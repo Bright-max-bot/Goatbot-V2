@@ -1,13 +1,16 @@
 const { GoogleGenAI } = require("@google/genai");
 
 const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY || "AQ.Ab8RN6JC_kDtgNoWhD6oxQTFqNasnVHKLJBYhHEcJIdTi3h36A"
+  apiKey: process.env.GEMINI_API_KEY
 });
+
+// Prevent duplicate execution
+const processedMessages = new Set();
 
 module.exports.config = {
   name: "zia",
   aliases: ["nova", "asknova", "gemini"],
-  version: "3.0.0",
+  version: "3.1.0",
   author: "Bright Hemsworth",
   hasPermission: 0,
   credits: "Bright Hemsworth",
@@ -21,6 +24,20 @@ module.exports.config = {
 };
 
 module.exports.run = async function ({ api, event, args }) {
+
+  // Block duplicate message execution
+  if (processedMessages.has(event.messageID)) {
+    return;
+  }
+
+  processedMessages.add(event.messageID);
+
+  // Remove old IDs after 1 minute
+  setTimeout(() => {
+    processedMessages.delete(event.messageID);
+  }, 60000);
+
+
   const prompt = args.join(" ").trim();
 
   if (!prompt) {
@@ -38,72 +55,98 @@ Example:
     );
   }
 
+
   const start = Date.now();
 
-  try {
-    api.sendTypingIndicator(event.threadID, true);
 
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: prompt
+  try {
+
+    const result = await ai.models.generateContent({
+
+      model: "gemini-2.0-flash",
+
+      contents: prompt,
+
+      config: {
+        temperature: 0.9,
+        topP: 0.95,
+        topK: 40,
+        maxOutputTokens: 2048
+      }
+
     });
 
-    api.sendTypingIndicator(event.threadID, false);
 
     const answer =
-      response.text ||
-      response.output_text ||
-      "I couldn't generate a response.";
+      typeof result.text === "function"
+        ? result.text()
+        : result.text ||
+          result.outputText ||
+          result.output_text ||
+          "No response.";
+
 
     const time = ((Date.now() - start) / 1000).toFixed(2);
 
-    const message =
+
+    let message =
 `ASKNOVA AI
 
 ${answer}
 
 ━━━━━━━━━━━━━━━━━━
-Model  : Gemini 2.5 Flash
+Model  : Gemini 2.0 Flash
 Time   : ${time}s
 Author : Bright Hemsworth`;
 
-    if (message.length <= 1900) {
-      return api.sendMessage(
-        message,
-        event.threadID,
-        event.messageID
-      );
+
+    // Keep only one Messenger reply
+    if (message.length > 1900) {
+      message = message.substring(0, 1850) + "\n\n[Response shortened]";
     }
 
-    for (let i = 0; i < message.length; i += 1900) {
-      await api.sendMessage(
-        message.substring(i, i + 1900),
-        event.threadID
-      );
-    }
+
+    return api.sendMessage(
+      message,
+      event.threadID,
+      event.messageID
+    );
+
 
   } catch (err) {
-    api.sendTypingIndicator(event.threadID, false);
 
-    console.error(err);
 
-    let error = err.message;
+    console.error("Gemini Error:", err);
 
-    if (error.includes("401"))
+
+    let error = err.message || "Unknown error";
+
+
+    if (error.includes("401") || error.includes("API_KEY_INVALID")) {
       error = "Invalid Gemini API Key.";
+    }
 
-    if (error.includes("429"))
-      error = "Rate limit exceeded. Please try again later.";
+    else if (error.includes("403")) {
+      error = "Gemini API access denied.";
+    }
 
-    if (error.includes("503"))
-      error = "Gemini service is temporarily unavailable.";
+    else if (error.includes("429")) {
+      error = "Rate limit exceeded. Try again later.";
+    }
 
-    api.sendMessage(
+    else if (error.includes("503")) {
+      error = "Gemini service unavailable.";
+    }
+
+
+    return api.sendMessage(
 `ASKNOVA ERROR
 
 ${error}`,
       event.threadID,
       event.messageID
     );
+
   }
+
 };
