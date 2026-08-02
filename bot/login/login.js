@@ -1,5 +1,5 @@
 // set bash title
-process.stdout.write("\x1b]2;Goat Bot V2 - Made by NTKhang\x1b\x5c");
+process.stdout.write("\x1b]2;Bright Console • Production\x1b\x5c");
 const defaultRequire = require;
 
 function decode(text) {
@@ -650,6 +650,21 @@ async function getAppStateToLogin(loginWithEmail) {
 
 function stopListening(keyListen) {
         keyListen = keyListen || Object.keys(callbackListenTime).pop();
+
+        // CRITICAL: disable the callback for this key IMMEDIATELY and
+        // SYNCHRONOUSLY, before we ever await the real network teardown.
+        // Previously this was only done inside the async stopListening()
+        // callback, and the (broken) "called" check below resolved the
+        // promise instantly regardless of whether that callback had fired.
+        // That left a window where the old MQTT socket was still alive
+        // (and still routing events to its callback) at the same time a
+        // new listener was started, so every incoming event was processed
+        // twice. Disabling the key up-front means even if the underlying
+        // socket takes time (or never cleanly) closes, its events are
+        // dropped as soon as they arrive.
+        if (keyListen && callbackListenTime[keyListen])
+                callbackListenTime[keyListen] = () => { };
+
         return new Promise((resolve) => {
                 // 5-second timeout so a hung FCA connection never blocks recovery
                 const safeResolve = (() => {
@@ -658,14 +673,46 @@ function stopListening(keyListen) {
                 })();
                 const timer = setTimeout(safeResolve, 5000);
 
-                const called = global.GoatBot.fcaApi?.stopListening?.(() => {
+                const fcaApi = global.GoatBot.fcaApi;
+                if (fcaApi && typeof fcaApi.stopListening === "function") {
+                        try {
+                                fcaApi.stopListening(() => {
+                                        clearTimeout(timer);
+                                        safeResolve();
+                                });
+                        }
+                        catch (err) {
+                                clearTimeout(timer);
+                                safeResolve();
+                        }
+                }
+                else {
                         clearTimeout(timer);
-                        if (callbackListenTime[keyListen])
-                                callbackListenTime[keyListen] = () => { };
                         safeResolve();
-                });
-                if (!called) { clearTimeout(timer); safeResolve(); }
+                }
         });
+}
+
+// ————————————— SINGLE-LISTENER GUARD ————————————— //
+// All MQTT listener (re)starts MUST go through this function. It:
+//   1. Serializes start/stop operations with a promise-chain lock so two
+//      concurrent reconnect paths (e.g. an MQTT error firing while a
+//      restartListenMqtt cycle is also firing) can never both call
+//      api.listenMqtt() at once.
+//   2. Always stops whatever listener currently exists before creating a
+//      new one, so there is never more than one live MQTT listener.
+// `createCallBackListenFn` is passed in because createCallBackListen() is
+// (re)created per login session further down; the lock itself stays here
+// at module scope so it serializes across relogins/account switches too.
+let listenMqttLock = Promise.resolve();
+function safeStartListening(api, createCallBackListenFn, key) {
+        listenMqttLock = listenMqttLock
+                .catch(() => { })
+                .then(async () => {
+                        await stopListening();
+                        global.GoatBot.Listening = api.listenMqtt(createCallBackListenFn(key));
+                });
+        return listenMqttLock;
 }
 
 // function removeListener(keyListen) {
@@ -1083,7 +1130,7 @@ async function startBot(loginWithEmail) {
                                                                 const cookieIsLive = await checkLiveCookie(cookieString, facebookAccount.userAgent);
                                                                 if (cookieIsLive) {
                                                                         isSendNotiErrorMessage = false;
-                                                                        global.GoatBot.Listening = api.listenMqtt(createCallBackListen());
+                                                                        await safeStartListening(api, createCallBackListen);
                                                                 } else {
                                                                         // Cookie still invalid, try full re-login
                                                                         startBot(true);
@@ -1115,9 +1162,6 @@ async function startBot(loginWithEmail) {
                                                 if (global.GoatBot.config.autoRestartWhenListenMqttError)
                                                         process.exit(2);
                                                 else {
-                                                        const keyListen = Object.keys(callbackListenTime).pop();
-                                                        if (callbackListenTime[keyListen])
-                                                                callbackListenTime[keyListen] = () => { };
                                                         const cookieString = appState.map(i => i.key + "=" + i.value).join("; ");
 
                                                         let times = 5;
@@ -1140,7 +1184,7 @@ async function startBot(loginWithEmail) {
                                                                                 intervalCheckLiveCookieAndRelogin = false;
                                                                                 const keyListen = Date.now();
                                                                                 isSendNotiErrorMessage = false;
-                                                                                global.GoatBot.Listening = api.listenMqtt(createCallBackListen(keyListen));
+                                                                                await safeStartListening(api, createCallBackListen, keyListen);
                                                                         }
                                                                 }, 5000);
                                                         }
@@ -1197,22 +1241,20 @@ async function startBot(loginWithEmail) {
                                                 return;
                                 }
 
-                                // OPTIMIZED: Memory-efficient message deduplication with callback cleanup
-                                const MAX_CALLBACKS = 3;
-                                if (event.messageID && event.type == "message") {
-                                        if (global.GoatBot.storage5Message?.includes(event.messageID)) {
-                                                // Duplicate detected - clean up old callbacks
-                                                const keys = Object.keys(callbackListenTime);
-                                                if (keys.length > MAX_CALLBACKS) {
-                                                        const keysToRemove = keys.slice(0, keys.length - MAX_CALLBACKS);
-                                                        keysToRemove.forEach(key => delete callbackListenTime[key]);
-                                                }
-                                        } else {
-                                                if (!global.GoatBot.storage5Message) global.GoatBot.storage5Message = [];
-                                                global.GoatBot.storage5Message.push(event.messageID);
-                                                if (global.GoatBot.storage5Message.length > 5)
-                                                        global.GoatBot.storage5Message.shift();
+                                // Facebook / the MQTT transport can redeliver the same event more
+                                // than once (reconnects, ack races, etc). Any event carrying a
+                                // messageID is deduplicated here — on a repeat, we return
+                                // IMMEDIATELY so it is never handed to handlerAction twice.
+                                const DEDUP_CACHE_SIZE = 200;
+                                if (event.messageID) {
+                                        if (!global.GoatBot.storage5Message) global.GoatBot.storage5Message = [];
+                                        if (global.GoatBot.storage5Message.includes(event.messageID)) {
+                                                // Duplicate Facebook event — ignore it.
+                                                return;
                                         }
+                                        global.GoatBot.storage5Message.push(event.messageID);
+                                        if (global.GoatBot.storage5Message.length > DEDUP_CACHE_SIZE)
+                                                global.GoatBot.storage5Message.shift();
                                 }
 
                                 if (configLog.disableAll === false && configLog[event.type] !== false) {
@@ -1246,17 +1288,17 @@ async function startBot(loginWithEmail) {
                                         return log.err('GBAN', getText('login', 'youAreBanned'));
                         }
                         // ————————————————— CREATE CALLBACK ————————————————— //
-                                                const MAX_CALLBACK_LISTENERS = 5; // Prevent memory bloat
-
                                                 function createCallBackListen(key) {
                                                         key = randomString(10) + (key || Date.now());
-                                                        
-                                                        // Cleanup: Remove oldest callback if we have too many
-                                                        const keys = Object.keys(callbackListenTime);
-                                                        if (keys.length >= MAX_CALLBACK_LISTENERS) {
-                                                                delete callbackListenTime[keys[0]];
+
+                                                        // Only ONE MQTT listener is ever allowed to be live at a time.
+                                                        // Wipe every previous entry (rather than just trimming to a
+                                                        // cap) so there is no possibility of a stale key's wrapper
+                                                        // still routing events to a second, supposedly-dead listener.
+                                                        for (const oldKey of Object.keys(callbackListenTime)) {
+                                                                delete callbackListenTime[oldKey];
                                                         }
-                                                        
+
                                                         callbackListenTime[key] = callBackListen;
                                                         return function (error, event) {
                                                                 if (callbackListenTime[key]) {
@@ -1265,8 +1307,7 @@ async function startBot(loginWithEmail) {
                                                         };
                                                 }
                         // ———————————————————— START BOT ———————————————————— //
-                        await stopListening();
-                        global.GoatBot.Listening = api.listenMqtt(createCallBackListen());
+                        await safeStartListening(api, createCallBackListen);
                         global.GoatBot.callBackListen = callBackListen;
                         // ——————————————————— UPTIME ——————————————————— //
                         if (global.GoatBot.config.serverUptime.enable == true && !global.GoatBot.config.dashBoard?.enable && !global.serverUptimeRunning) {
@@ -1312,9 +1353,8 @@ async function startBot(loginWithEmail) {
                                                 return log.warn("LISTEN_MQTT", getText('login', 'stopRestartListenMessage'));
                                         }
                                         try {
-                                                await stopListening();
                                                 await sleep(1000);
-                                                global.GoatBot.Listening = api.listenMqtt(createCallBackListen());
+                                                await safeStartListening(api, createCallBackListen);
                                                 log.info("LISTEN_MQTT", getText('login', 'restartListenMessage2'));
                                         }
                                         catch (e) {
