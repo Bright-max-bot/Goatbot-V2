@@ -21,20 +21,23 @@
     "ignoreCommand": []
   },
   "adminBot": [
-    "100065959714609, 100044670136397"
+    "100065959714609",
+    "100044670136397"
   ],
   "premiumUsers": [
-    "100065959714609, 100044670136397"
+    "100065959714609",
+    "100044670136397"
   ],
   "devUsers": [
-    "100065959714609, 100044670136397"
+    "100065959714609",
+    "100044670136397"
   ],
   "notes_premiumUsers": "List of user IDs with premium access (role 3)",
   "notes_devUsers": "List of developer IDs with full access (role 4)",
   "whiteListMode": {
     "enable": false,
     "whiteListIds": [
-      "61588057525081"
+      "100065959714609"
     ],
     "notes": "If enabled, only the IDs in the whiteListIds list can use the bot"
   },
@@ -144,18 +147,8 @@
     "listenEvents": true,
     "listenTyping": true,
     "updatePresence": false,
-    "autoMarkDelivery": false,
     "autoMarkRead": true,
     "autoReconnect": true,
-    "forceLogin": true,
-    "simulateTyping": true,
-    "randomUserAgent": false,
-    "persona": "desktop",
-    "stealthMode": true,
-    "maxConcurrentRequests": 5,
-    "maxRequestsPerMinute": 50,
-    "requestCooldownMs": 60000,
-    "errorCacheTtlMs": 300000,
-    "notes": "@lazyneoaz/metachat options. See node_modules/@lazyneoaz/metachat/README.md for full documentation"
+    "forceLogin": true
   }
 }
