@@ -28,7 +28,7 @@ module.exports = {
 	config: {
 		name: "stats",
 		version: "3.0.0",
-		author: "NeoKEX",
+		author: "Bright",
 		countDown: 5,
 		role: 0,
 		shortDescription: {
@@ -78,41 +78,46 @@ module.exports = {
 			const analyticsPending = analyticsStats.bufferSize || 0;
 
 			// Build the message with up command design
-			const statsMsg = 
-				`┌─── BOT STATISTICS ───×\n` +
-				`│\n` +
-				`│ [~] Uptime: ${uptime}\n` +
-				`│ [~] Commands: ${commandCount}\n` +
-				`│ [~] Events: ${eventCount}\n` +
-				`│ [~] Aliases: ${aliasCount}\n` +
-				`│ [~] Threads: ${threadCount}\n` +
-				`│ [~] Users: ${userCount}\n` +
-				`│\n` +
-				`├─── MEMORY USAGE ───×\n` +
-				`│ [~] Heap Used: ${formatBytes(memory.heapUsed)}\n` +
-				`│ [~] Heap Total: ${formatBytes(memory.heapTotal)}\n` +
-				`│ [~] RSS: ${formatBytes(memory.rss)}\n` +
-				`│ [~] External: ${formatBytes(memory.external)}\n` +
-				`│\n` +
-				`├─── SYSTEM MEMORY ───×\n` +
-				`│ [~] Total: ${formatBytes(totalMem)}\n` +
-				`│ [~] Free: ${formatBytes(freeMem)}\n` +
-				`│ [~] Used: ${formatBytes(totalMem - freeMem)}\n` +
-				`│\n` +
-				`├─── PERFORMANCE ───×\n` +
-				`│ [~] Cooldown Checks: ${cooldownStats.totalChecks}\n` +
-				`│ [~] Blocked Commands: ${cooldownStats.blocked}\n` +
-				`│ [~] Analytics Buffered: ${analyticsStats.buffered}\n` +
-				`│ [~] Analytics Flushed: ${analyticsStats.flushed}\n` +
-				`│\n` +
-				`├─── OPTIMIZATIONS ───×\n` +
-				`│ [~] Spam Tracker: ${spamStatus}\n` +
-				`│ [~] Cooldown Manager: ON (${cooldownEntries} entries)\n` +
-				`│ [~] Analytics Batching: ON (${analyticsPending} pending)\n` +
-				`│ [~] Typing Indicator: ${typingEnabled}\n` +
-				`│ [~] Graceful Shutdown: ON\n` +
-				`└───────────────×\n` +
-				`Node.js ${process.version} | ${os.platform()} ${os.arch()} | ${new Date().toLocaleString()}`;
+			const statsMsg =
+`╭── SYSTEM OVERVIEW ──╮
+
+STATUS
+├ Uptime    : ${uptime}
+├ Commands  : ${commandCount}
+├ Events    : ${eventCount}
+├ Aliases   : ${aliasCount}
+├ Threads   : ${threadCount}
+└ Users     : ${userCount}
+
+MEMORY
+├ Heap Used : ${formatBytes(memory.heapUsed)}
+├ Heap Total: ${formatBytes(memory.heapTotal)}
+├ RSS       : ${formatBytes(memory.rss)}
+└ External  : ${formatBytes(memory.external)}
+
+SYSTEM
+├ CPU       : ${os.cpus().length} Cores
+├ RAM       : ${formatBytes(totalMem - freeMem)}
+│             / ${formatBytes(totalMem)}
+├ Platform  : ${os.platform()}
+└ Node      : ${process.version}
+
+PERFORMANCE
+├ Checks    : ${cooldownStats.totalChecks || 0}
+├ Blocked   : ${cooldownStats.blocked || 0}
+├ Buffered  : ${analyticsStats.buffered || 0}
+└ Flushed   : ${analyticsStats.flushed || 0}
+
+FEATURES
+├ Spam      : ${spamStatus}
+├ Cooldown  : ON
+├ Analytics : ON
+├ Typing    : ${typingEnabled}
+└ Shutdown  : ON
+
+╰────────────────────╯
+     𝗕𝗿𝗶𝗴𝗵𝘁 𝗛𝗲𝗺𝘀𝘄𝗼𝗿𝘁𝗵
+`;
 
 			return message.reply(statsMsg);
 		} catch (err) {
