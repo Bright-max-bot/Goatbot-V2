@@ -8,6 +8,7 @@
                 "npm": ">=7.0.0"
         },
         "dependencies": {
+                "@google/generative-ai": "^0.24.1",
                 "request": "^2.88.2",
                 "request-promise": "^4.2.6",
                 "@dongdev/fca-unofficial": "^4.0.3",
