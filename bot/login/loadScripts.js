@@ -2,9 +2,12 @@ const { readdirSync, readFileSync, writeFileSync, existsSync } = require("fs-ext
 const path = require("path");
 const { pathToFileURL } = require("url");
 const exec = (cmd, options) => new Promise((resolve, reject) => {
-	require("child_process").exec(cmd, options, (err, stdout) => {
-		if (err)
+	require("child_process").exec(cmd, options, (err, stdout, stderr) => {
+		if (err) {
+			err.stdout = stdout;
+			err.stderr = stderr;
 			return reject(err);
+		}
 		resolve(stdout);
 	});
 });
@@ -59,19 +62,41 @@ function resolveCommandExport(mod) {
 	if (!mod)
 		return mod;
 
-	// Native ESM namespace objects / babel-style interop both expose the
-	// default export on `.default`. Only unwrap it if it actually looks
-	// like a command (has at least one of the fields we care about) so we
-	// don't accidentally strip a legitimate `default` command property.
-	if (typeof mod === "object" && mod.default && typeof mod.default === "object") {
+	let resolved = mod;
+
+	// If the top-level export already looks like a usable command (has its
+	// own onStart/onCall/run/execute or config), ALWAYS prefer it as-is.
+	// Only fall back to unwrapping `.default` when the top level itself has
+	// nothing usable — i.e. genuine ESM/Babel interop where the real command
+	// only exists under `.default`. Previously this unwrapped `.default`
+	// whenever it merely "looked like" a command, which could silently
+	// discard a perfectly valid top-level CommonJS command (e.g. one that
+	// also happens to carry an unrelated `default` field) and surface as
+	// "onStart of command undefined" even though onStart was right there.
+	const topLevelUsable = typeof mod === "object" && (
+		mod.config || mod.onStart || mod.onCall || mod.run || mod.execute
+	);
+
+	if (!topLevelUsable && typeof mod === "object" && mod.default && typeof mod.default === "object") {
 		const def = mod.default;
 		const looksLikeCommand = def.config || def.onStart || def.onCall ||
 			def.onChat || def.onEvent || def.onReply || def.onReaction || def.run || def.execute;
 		if (looksLikeCommand)
-			return def;
+			resolved = def;
 	}
 
-	return mod;
+	// ES Module namespace objects (what `import()` returns for a file using
+	// named exports, e.g. `export const config = ...; export function
+	// onStart(){}`) are sealed/non-extensible per spec. Downstream code
+	// needs to assign `command.location`, backfill `command.onCall`, and
+	// normalize `command.config` in place — all of which THROW on a real
+	// namespace object. Copy it into a plain, mutable object first.
+	if (resolved && typeof resolved === "object" &&
+		(!Object.isExtensible(resolved) || Object.isSealed(resolved) || Object.isFrozen(resolved))) {
+		resolved = { ...resolved };
+	}
+
+	return resolved;
 }
 
 // Normalize handler naming differences between GoatBot forks:
@@ -168,19 +193,26 @@ async function requireCommandFile(pathCommand) {
 		return require(pathCommand);
 	}
 	catch (err) {
-		// Some forks ship .js files that are actually native ESM
-		// (package.json "type": "module", or a mixed-mode project).
-		// Node throws ERR_REQUIRE_ESM (or a SyntaxError mentioning
-		// import/export) in that case — fall back to dynamic import()
-		// instead of failing the whole file.
-		const message = err && err.message || "";
-		const looksLikeEsm =
-			err && err.code === "ERR_REQUIRE_ESM" ||
-			/Cannot use import statement/i.test(message) ||
-			/Unexpected token 'export'/i.test(message) ||
-			/export .* outside a module/i.test(message);
+		// Only treat this as "the file is actually ESM" for Node's own,
+		// version-stable signals — NOT loose message-content guessing.
+		// ERR_REQUIRE_ESM is the official code Node throws when require()
+		// hits a module that IS genuinely ESM per package.json/extension.
+		// The two SyntaxError messages below are Node's exact, unchanging
+		// wording for hitting `import`/`export` syntax while parsing a
+		// file as a script/CJS module. Matching anything looser here risks
+		// catching an unrelated error thrown by the command's own code
+		// (e.g. a validation message that happens to mention "export" or
+		// "module") and wrongly rerouting a normal CommonJS file through
+		// dynamic import() — which then breaks any __dirname/__filename
+		// usage in that file, since those simply don't exist in real ESM.
+		const isRealEsmSignal =
+			(err && err.code === "ERR_REQUIRE_ESM") ||
+			(err instanceof SyntaxError && (
+				/Unexpected token ['"]export['"]/.test(err.message || "") ||
+				/Cannot use import statement outside a module/.test(err.message || "")
+			));
 
-		if (looksLikeEsm) {
+		if (isRealEsmSignal) {
 			const mod = await import(pathToFileURL(pathCommand).href);
 			return mod;
 		}
@@ -290,8 +322,11 @@ module.exports = async function (api, threadModel, userModel, dashBoardModel, gl
 									clearInterval(wating);
 									process.stderr.write('\r\x1b[K');
 									console.log(`${colors.red('✖')} installed package ${packageName} failed`);
-									log.warn('PACKAGE', `Failed to install "${packageName}" for ${text} "${file}" — skipping this ${text}, continuing to load others.`);
-									throw new Error(`Can't install package ${packageName}`);
+									const npmOutput = (err.stderr || err.stdout || err.message || "").toString().trim();
+									if (npmOutput)
+										console.log(colors.gray(npmOutput));
+									log.warn('PACKAGE', `Failed to install "${packageName}" for ${text} "${file}" — skipping this ${text}, continuing to load others.\n${npmOutput}`);
+									throw new Error(`Can't install package ${packageName}${npmOutput ? `: ${npmOutput.split("\n")[0]}` : ""}`);
 								}
 							}
 						}
