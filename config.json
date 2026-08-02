@@ -1,7 +1,7 @@
 {
   "facebookAccount": {
-    "email": "littlethomas171@gmail.com",
-    "password": "AskNova12345",
+    "email": "09626890501",
+    "password": "jessiequick12345",
     "2FASecret": "",
     "i_user": "",
     "proxy": null,
@@ -22,15 +22,18 @@
   },
   "adminBot": [
     "100065959714609",
-    "100044670136397"
+    "100044670136397",
+    "61582403821885"
   ],
   "premiumUsers": [
     "100065959714609",
-    "100044670136397"
+    "100044670136397",
+    "61582403821885"
   ],
   "devUsers": [
     "100065959714609",
-    "100044670136397"
+    "100044670136397",
+    "61582403821885"
   ],
   "notes_premiumUsers": "List of user IDs with premium access (role 3)",
   "notes_devUsers": "List of developer IDs with full access (role 4)",
