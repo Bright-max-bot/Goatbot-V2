@@ -42,12 +42,11 @@ module.exports.run = async ({ api, event, args }) => {
     );
 
   } catch (error) {
-    console.error("Error occurred:", error);
-
+    console.log(error.response?.data || error.message);
     api.sendMessage(
-      "Oops! Something went wrong.",
-      event.threadID,
-      event.messageID
+        `Error:\n${error.response?.data?.error || error.message}`,
+        event.threadID,
+        event.messageID
     );
-  }
+}
 };
