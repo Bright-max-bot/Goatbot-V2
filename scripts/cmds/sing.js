@@ -9,14 +9,81 @@ const { execFileSync } = require("child_process");
 const cacheDir = path.join(__dirname, "cache");
 const cookiesFilePath = path.join(cacheDir, "cookies.txt");
 
-// Path to the yt-dlp binary that youtube-dl-exec vendors.
-const ytDlpBinPath = path.join(
-  __dirname,
-  "node_modules",
-  "youtube-dl-exec",
-  "bin",
-  process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp"
-);
+// ---------------------------------------------------------------------------
+// yt-dlp binary resolution.
+//
+// IMPORTANT: we never hand-build a path like `__dirname + "/node_modules/..."`.
+// GoatBot commands can end up nested several levels deep (e.g.
+// /app/scripts/cmds/sing.js) while youtube-dl-exec may actually be installed
+// higher up the tree (hoisted to the project root's node_modules) or, less
+// commonly, nested right next to this file. Node's own module resolution
+// algorithm (the same one `require()` uses) is the only thing that reliably
+// finds the correct copy for *this* file's location, so we lean on
+// `require.resolve()` exclusively — never `path.join()` — for locating it.
+//
+// We try a small list of candidate subpaths (both binary names, regardless
+// of platform) because some Windows builds still ship the extension-less
+// name and some third-party mirrors ship `.exe` even where you wouldn't
+// expect it. Each candidate is resolved independently so one failure never
+// blocks the others.
+// ---------------------------------------------------------------------------
+
+let ytDlpBinPath = null;
+let ytDlpBinSource = null; // which candidate subpath actually resolved
+let ytDlpModulePath = null; // resolved youtube-dl-exec/package.json, for diagnostics only
+let ytDlpResolutionError = null;
+
+function resolveYtDlpModulePath() {
+  try {
+    return { path: require.resolve("youtube-dl-exec/package.json"), error: null };
+  } catch (e) {
+    return { path: null, error: e.message };
+  }
+}
+
+function resolveYtDlpBinary() {
+  const candidates =
+    process.platform === "win32"
+      ? ["youtube-dl-exec/bin/yt-dlp.exe", "youtube-dl-exec/bin/yt-dlp"]
+      : ["youtube-dl-exec/bin/yt-dlp", "youtube-dl-exec/bin/yt-dlp.exe"];
+
+  const errors = [];
+  for (const candidate of candidates) {
+    try {
+      const resolved = require.resolve(candidate);
+      return { path: resolved, source: candidate, error: null };
+    } catch (e) {
+      errors.push(`${candidate} -> ${e.message}`);
+    }
+  }
+  return { path: null, source: null, error: errors.join(" | ") };
+}
+
+(function initYtDlpBinaryResolution() {
+  const moduleResult = resolveYtDlpModulePath();
+  ytDlpModulePath = moduleResult.path;
+  if (!moduleResult.path) {
+    console.warn(
+      "sing.js: could not resolve the youtube-dl-exec package itself —",
+      moduleResult.error
+    );
+  }
+
+  const binResult = resolveYtDlpBinary();
+  ytDlpBinPath = binResult.path;
+  ytDlpBinSource = binResult.source;
+  ytDlpResolutionError = binResult.error;
+
+  if (!ytDlpBinPath) {
+    // Never crash on this — the bot should keep running (search UI, replies,
+    // etc. all still work), it just won't be able to actually download
+    // audio until this is fixed.
+    console.warn(
+      "sing.js: could not resolve a yt-dlp binary via require.resolve() — downloads will fail until this is fixed. Reason:",
+      ytDlpResolutionError
+    );
+  }
+})();
 
 // ---------------------------------------------------------------------------
 // In-memory guards / caches (per-process, reset on redeploy/restart).
@@ -28,7 +95,8 @@ const ytDlpBinPath = path.join(
 const activeDownloads = new Set();
 
 // Cached after first detection so we don't shell out to `--help` on every
-// single download attempt.
+// single download attempt. yt-dlp's capabilities don't change mid-process,
+// so this is safe to cache for the lifetime of the process.
 let impersonateSupportCache = null;
 
 // ---------------------------------------------------------------------------
@@ -118,7 +186,18 @@ async function validateCookiesFile() {
   return { valid: true, cookieCount: cookieLines.length };
 }
 
+/**
+ * Reads the yt-dlp version by invoking the resolved binary directly. This is
+ * the one place we still shell out to the binary manually — it's purely for
+ * diagnostics (there's no youtube-dl-exec API for "give me --version" that's
+ * cheaper than just running it), and it's guarded so a missing/broken binary
+ * can never crash the process.
+ */
 function getYtDlpVersion() {
+  if (!ytDlpBinPath) {
+    console.warn("sing.js: skipping version check — no yt-dlp binary was resolved.");
+    return null;
+  }
   try {
     return execFileSync(ytDlpBinPath, ["--version"], { timeout: 10000 }).toString().trim();
   } catch (e) {
@@ -128,13 +207,18 @@ function getYtDlpVersion() {
 }
 
 /**
- * Detects whether the vendored yt-dlp binary supports --impersonate
+ * Detects whether the resolved yt-dlp binary supports --impersonate
  * (requires yt-dlp to be built/installed with curl_cffi). Not every
  * distribution of yt-dlp ships with impersonation support, so we probe
  * `--help` once and cache the result rather than assuming.
  */
 function detectImpersonateSupport() {
   if (impersonateSupportCache !== null) return impersonateSupportCache;
+  if (!ytDlpBinPath) {
+    console.warn("sing.js: skipping --impersonate probe — no yt-dlp binary was resolved.");
+    impersonateSupportCache = false;
+    return impersonateSupportCache;
+  }
   try {
     const help = execFileSync(ytDlpBinPath, ["--help"], { timeout: 10000 }).toString();
     impersonateSupportCache = help.includes("--impersonate");
@@ -147,16 +231,31 @@ function detectImpersonateSupport() {
 }
 
 function logStartupDiagnostics() {
+  console.log("sing.js: ---- startup diagnostics ----");
+  console.log("sing.js: platform:", process.platform, "| node:", process.version);
+  console.log(
+    "sing.js: resolved youtube-dl-exec module path:",
+    ytDlpModulePath ? path.dirname(ytDlpModulePath) : "NOT FOUND"
+  );
+  console.log(
+    "sing.js: resolved yt-dlp binary path:",
+    ytDlpBinPath ? `${ytDlpBinPath} (via "${ytDlpBinSource}")` : `NOT FOUND — ${ytDlpResolutionError || "unknown reason"}`
+  );
+
   const version = getYtDlpVersion();
   console.log("sing.js: yt-dlp version:", version || "unknown");
   detectImpersonateSupport();
+
   console.log(
     "sing.js: YT_ env keys visible:",
     Object.keys(process.env).filter((k) => k.startsWith("YT_"))
   );
+  console.log("sing.js: ---- end startup diagnostics ----");
 }
 
-ensureCookiesFile().then(() => logStartupDiagnostics());
+ensureCookiesFile()
+  .then(() => logStartupDiagnostics())
+  .catch((e) => console.error("sing.js: startup diagnostics failed unexpectedly —", e.message));
 
 // ---------------------------------------------------------------------------
 // Error classification: turns raw yt-dlp stderr into a known category +
@@ -206,11 +305,37 @@ const ERROR_PATTERNS = [
     test: /429|too many requests|rate.?limit/i,
     friendly: "YouTube is rate-limiting this server right now. Please try again in a bit.",
   },
+  {
+    type: "network_failure",
+    test: /econnreset|enotfound|etimedout|network is unreachable|socket hang up|econnrefused/i,
+    friendly: "A network error occurred while talking to YouTube. Please try again.",
+  },
+  {
+    type: "timeout",
+    test: /timed out|operation timeout/i,
+    friendly: "The download timed out. Please try again.",
+  },
+  {
+    type: "binary_missing",
+    test: /enoent.*yt-dlp|spawn.*enoent/i,
+    friendly:
+      "The download engine isn't available on this server right now. An admin needs to check the deployment (yt-dlp binary missing).",
+  },
 ];
+
+// Failure types that are worth retrying (transient / environment-level) as
+// opposed to failures that are inherent to the video itself and will never
+// succeed no matter how many times we retry.
+const RETRYABLE_TYPES = new Set(["rate_limited", "network_failure", "timeout"]);
+
+// Failure types that should never be retried, even against a different
+// format/strategy — retrying wastes time and just re-confirms the same
+// permanent outcome.
+const NEVER_RETRY_TYPES = new Set(["private_video", "unavailable", "login_required"]);
 
 /**
  * @param {string} stderrOrMessage raw text from a failed yt-dlp invocation
- * @returns {{type: string, friendly: string, transient: boolean}}
+ * @returns {{type: string, friendly: string, transient: boolean, retryable: boolean}}
  */
 function classifyError(stderrOrMessage) {
   const text = stderrOrMessage || "";
@@ -219,7 +344,8 @@ function classifyError(stderrOrMessage) {
       return {
         type: pattern.type,
         friendly: pattern.friendly,
-        transient: pattern.type === "rate_limited",
+        transient: RETRYABLE_TYPES.has(pattern.type),
+        retryable: !NEVER_RETRY_TYPES.has(pattern.type),
       };
     }
   }
@@ -227,6 +353,7 @@ function classifyError(stderrOrMessage) {
     type: "unknown",
     friendly: "Download failed for an unknown reason. Check server logs for details.",
     transient: false,
+    retryable: true,
   };
 }
 
@@ -255,10 +382,32 @@ const MIN_VALID_MP3_BYTES = 15 * 1024; // ~15KB floor to catch empty/broken file
 // Core download routine.
 // Tries multiple format strings, and for each format string tries with/without
 // --impersonate + youtube:player_client=web when supported, retrying
-// transient (rate-limit) failures with exponential backoff.
+// transient (rate-limit/network/timeout) failures with exponential backoff.
+//
+// This calls youtube-dl-exec's official API (`youtubedl(url, options)`)
+// exclusively for the actual download — we never spawn the yt-dlp binary
+// ourselves for this part, so binary path resolution mistakes here can't
+// happen. Manual invocation is reserved strictly for the diagnostics above
+// (version / --help probing), which is unavoidable since youtube-dl-exec
+// doesn't expose those as API calls.
 // ---------------------------------------------------------------------------
 
 async function downloadAudio(url, outputPath) {
+  if (!ytDlpBinPath) {
+    // Fail fast with a clear, correctly-classified error instead of letting
+    // youtube-dl-exec throw a raw ENOENT partway through a retry loop.
+    const message =
+      "yt-dlp binary is not available (resolution failed at startup: " +
+      (ytDlpResolutionError || "unknown reason") +
+      ")";
+    console.error("sing.js: aborting download —", message);
+    return {
+      success: false,
+      error: new Error(message),
+      classification: classifyError(message),
+    };
+  }
+
   const formatAttempts = ["bestaudio/best", "bestaudio*", "best"];
   const impersonateAvailable = detectImpersonateSupport();
 
@@ -279,11 +428,13 @@ async function downloadAudio(url, outputPath) {
 
   let lastError = null;
   let lastClassification = null;
+  let totalAttempts = 0;
 
-  for (const fmt of formatAttempts) {
+  outer: for (const fmt of formatAttempts) {
     for (const variant of strategyVariants) {
       const maxRetries = 2; // total attempts for transient errors on this exact strategy
       for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        totalAttempts++;
         const options = {
           format: fmt,
           extractAudio: true,
@@ -312,12 +463,15 @@ async function downloadAudio(url, outputPath) {
         }
 
         console.log(
-          `sing.js: attempting download — format="${fmt}" impersonate=${!!variant.impersonate} attempt=${attempt}/${maxRetries}`
+          `sing.js: attempting download — format="${fmt}" impersonate=${!!variant.impersonate} attempt=${attempt}/${maxRetries} (total attempt #${totalAttempts})`
         );
         console.log("sing.js: yt-dlp options:", JSON.stringify(redactOptionsForLogging(options)));
 
         try {
-          await youtubedl(url, options);
+          const result = await youtubedl(url, options);
+          if (result && typeof result === "string" && result.trim()) {
+            console.log("sing.js: yt-dlp stdout:\n", result);
+          }
 
           // Verify the file actually landed and isn't a truncated/empty stub.
           const exists = await fs.pathExists(outputPath);
@@ -328,24 +482,45 @@ async function downloadAudio(url, outputPath) {
           if (stat.size < MIN_VALID_MP3_BYTES) {
             throw new Error(`output file is suspiciously small (${stat.size} bytes)`);
           }
+          try {
+            await fs.access(outputPath, fs.constants.R_OK);
+          } catch (accessErr) {
+            throw new Error(`output file is not readable: ${accessErr.message}`);
+          }
 
-          console.log(`sing.js: download succeeded — format="${fmt}" impersonate=${!!variant.impersonate} size=${stat.size} bytes`);
+          console.log(
+            `sing.js: download succeeded — format="${fmt}" impersonate=${!!variant.impersonate} size=${stat.size} bytes exitCode=0 retries=${attempt - 1}`
+          );
           return { success: true };
         } catch (e) {
           const stderr = e.stderr || e.message || String(e);
+          const stdout = e.stdout || "";
+          const exitCode = typeof e.exitCode === "number" ? e.exitCode : (typeof e.code === "number" ? e.code : "unknown");
           lastError = e;
           lastClassification = classifyError(stderr);
 
           console.warn(
-            `sing.js: strategy failed — format="${fmt}" impersonate=${!!variant.impersonate} attempt=${attempt} type=${lastClassification.type}`
+            `sing.js: strategy failed — format="${fmt}" impersonate=${!!variant.impersonate} attempt=${attempt}/${maxRetries} type=${lastClassification.type} exitCode=${exitCode}`
           );
-          console.warn("sing.js: full stderr/stdout for failed attempt:\n", stderr);
+          if (stdout && stdout.trim()) {
+            console.warn("sing.js: stdout for failed attempt:\n", stdout);
+          }
+          console.warn("sing.js: stderr for failed attempt:\n", stderr);
 
           await fs.remove(outputPath).catch(() => {});
 
-          // Only retry the *same* strategy for transient (rate-limit) errors;
-          // anything else (bot-check, unavailable, etc.) won't be fixed by
-          // simply trying again with the same inputs, so move on immediately.
+          // Never retry failures that are inherent to the video itself —
+          // no amount of retrying fixes a private/unavailable video or a
+          // hard login requirement.
+          if (!lastClassification.retryable) {
+            console.log(`sing.js: "${lastClassification.type}" is not retryable — stopping entirely.`);
+            break outer;
+          }
+
+          // Only retry the *same* strategy for transient errors (rate-limit,
+          // network, timeout); anything else (bot-check, age-restricted,
+          // geo-restricted, etc.) won't be fixed by simply trying again with
+          // the same inputs, so move on to the next strategy immediately.
           if (lastClassification.transient && attempt < maxRetries) {
             const backoffMs = 1000 * 2 ** (attempt - 1); // 1s, 2s, ...
             console.log(`sing.js: transient error, backing off ${backoffMs}ms before retry`);
@@ -416,7 +591,13 @@ module.exports = {
         );
         const imgRes = await axios.get(v.thumbnail, { responseType: "arraybuffer", timeout: 10000 });
         await fs.writeFile(imgPath, Buffer.from(imgRes.data));
-        attachments.push(fs.createReadStream(imgPath));
+        const thumbStream = fs.createReadStream(imgPath);
+        // Readable streams emit 'error' on read failures; with no listener
+        // that's an uncaught exception that crashes the whole bot process.
+        thumbStream.on("error", (err) =>
+          console.error("sing.js: thumbnail stream error:", err.message)
+        );
+        attachments.push(thumbStream);
         tempImagePaths.push(imgPath);
       } catch (e) {
         console.error("sing.js: thumbnail fetch failed:", e.message);
@@ -447,6 +628,10 @@ module.exports = {
   },
 
   onReply: async function ({ message, event, Reply, api }) {
+    // Only the user who triggered the original search should be able to act
+    // on this reply.
+    if (event.senderID !== Reply.author) return;
+
     const choice = parseInt(event.body, 10);
     if (isNaN(choice) || choice < 1 || choice > Reply.results.length) return;
 
@@ -463,7 +648,8 @@ module.exports = {
     const threadID = event.threadID;
 
     // Unique-per-request filename (timestamp + random suffix) so concurrent
-    // downloads from different users never collide on disk.
+    // downloads from different users — or the same user across retries —
+    // never collide on disk.
     const filePath = path.join(
       cacheDir,
       `sing_dl_${Date.now()}_${crypto.randomBytes(4).toString("hex")}.mp3`
@@ -512,9 +698,14 @@ module.exports = {
       }
 
       try {
+        const audioStream = fs.createReadStream(filePath);
+        audioStream.on("error", (err) =>
+          console.error("sing.js: audio stream error:", err.message)
+        );
+
         await message.reply({
           body: selected.title,
-          attachment: fs.createReadStream(filePath),
+          attachment: audioStream,
         });
 
         await api.setMessageReaction("✅", event.messageID, threadID).catch((e) => {
