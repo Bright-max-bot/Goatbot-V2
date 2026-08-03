@@ -4,9 +4,6 @@ const axios = require("axios");
 const fs = require("fs-extra");
 const path = require("path");
 
-// --- Cookies support (needed to pass YouTube's bot-check) ---
-// YT_COOKIES_B64 = base64-encoded Netscape-format cookies.txt, set as a
-// Render environment variable. Decoded to a real file once at startup.
 const cookiesFilePath = path.join(__dirname, "cache", "cookies.txt");
 
 async function ensureCookiesFile() {
@@ -26,7 +23,6 @@ async function ensureCookiesFile() {
 }
 ensureCookiesFile();
 
-// --- DIAGNOSTIC: confirm what env vars this running process actually sees ---
 console.log(
   "sing.js: YT_ env keys visible:",
   Object.keys(process.env).filter((k) => k.startsWith("YT_"))
@@ -36,7 +32,7 @@ module.exports = {
   config: {
     name: "sing",
     aliases: ["song", "music"],
-    version: "3.0",
+    version: "3.1",
     author: "Bright",
     countDown: 5,
     role: 0,
@@ -123,6 +119,7 @@ module.exports = {
 
     try {
       const options = {
+        format: "bestaudio/best", // let yt-dlp pick a valid audio-only (or fallback) stream before extraction
         extractAudio: true,
         audioFormat: "mp3",
         audioQuality: 0, // best
