@@ -7,20 +7,10 @@ function getClient() {
   return ai;
 }
 
-const processedMessages = new Map();
-
-function alreadyHandled(messageID) {
-  if (!messageID) return false;
-  if (processedMessages.has(messageID)) return true;
-  const timer = setTimeout(() => processedMessages.delete(messageID), 60000);
-  processedMessages.set(messageID, timer);
-  return false;
-}
-
 module.exports.config = {
   name: "zia",
   aliases: ["nova", "asknova", "gemini"],
-  version: "3.2.0",
+  version: "3.3.0",
   author: "Bright Hemsworth",
   credits: "Bright Hemsworth",
   description: "Advanced AI Assistant powered by Google Gemini",
@@ -40,7 +30,11 @@ module.exports.config = {
 };
 
 module.exports.run = async function ({ api, event, args }) {
-  if (alreadyHandled(event.messageID)) return;
+  // CRITICAL: ignore messages sent by the bot's own account.
+  // Your logs show "Ask Nova" (61582403821885) — the bot itself — triggering
+  // this command on its own error replies, causing the reply loop.
+  const botID = api.getCurrentUserID ? api.getCurrentUserID() : null;
+  if (botID && event.senderID === botID) return;
 
   const prompt = args.join(" ").trim();
 
@@ -74,14 +68,14 @@ No Gemini API key is configured on this bot (GEMINI_API_KEY is missing). Get a f
 
   try {
     const result = await client.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: prompt,
-      config: {
-        temperature: 0.9,
-        topP: 0.95,
-        topK: 40,
-        maxOutputTokens: 2048
-      }
+      // gemini-2.5-flash is being retired (Oct 16, 2026) and already blocked
+      // for new API keys — that's what caused your 404. gemini-3.6-flash is
+      // the current GA replacement as of this writing.
+      model: "gemini-3.6-flash",
+      contents: prompt
+      // Note: temperature / topP / topK are deprecated on 3.x models —
+      // omitted intentionally. If you need to tune output, check Google's
+      // current sampling docs for the 3.x equivalent before re-adding.
     });
 
     const answer =
@@ -100,7 +94,7 @@ No Gemini API key is configured on this bot (GEMINI_API_KEY is missing). Get a f
 ${answer}
 
 ━━━━━━━━━━━━━━━━━━
-Model  : Gemini 2.5 Flash
+Model  : Gemini 3.6 Flash
 Time   : ${time}s
 Author : Bright Hemsworth`;
 
@@ -115,7 +109,7 @@ Author : Bright Hemsworth`;
     );
 
   } catch (err) {
-    console.error("Gemini Error:", err);
+    console.error("Gemini raw error:", JSON.stringify(err, Object.getOwnPropertyNames(err)));
 
     let error = err.message || "Unknown error";
 
@@ -123,9 +117,9 @@ Author : Bright Hemsworth`;
       error = "Invalid Gemini API Key.";
     }
     else if (error.includes("403")) {
-      error = "Gemini API access denied.";
+      error = "Gemini API access denied — check that the Generative Language API is enabled for this key.";
     }
-    else if (error.includes("404") || error.includes("NOT_FOUND")) {
+    else if (/model.*not found|model.*does not exist|no longer available/i.test(error)) {
       error = "That Gemini model is unavailable or has been retired. Try updating the model name in the command file.";
     }
     else if (error.includes("429")) {
