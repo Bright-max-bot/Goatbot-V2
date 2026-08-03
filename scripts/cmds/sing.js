@@ -3,8 +3,18 @@ const youtubedl = require("youtube-dl-exec");
 const axios = require("axios");
 const fs = require("fs-extra");
 const path = require("path");
+const { execSync } = require("child_process");
 
 const cookiesFilePath = path.join(__dirname, "cache", "cookies.txt");
+
+// Path to the yt-dlp binary that youtube-dl-exec vendors
+const ytDlpBinPath = path.join(
+  __dirname,
+  "node_modules",
+  "youtube-dl-exec",
+  "bin",
+  process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp"
+);
 
 async function ensureCookiesFile() {
   if (await fs.pathExists(cookiesFilePath)) return;
@@ -28,11 +38,39 @@ console.log(
   Object.keys(process.env).filter((k) => k.startsWith("YT_"))
 );
 
+// --- Log current yt-dlp binary version, then attempt a self-update ---
+// A stale bundled yt-dlp binary is a common cause of
+// "Requested format is not available" even when auth/cookies are fine,
+// since YouTube frequently changes its player response format.
+function logAndUpdateYtDlp() {
+  try {
+    const before = execSync(`"${ytDlpBinPath}" --version`).toString().trim();
+    console.log("sing.js: yt-dlp version (before update):", before);
+  } catch (e) {
+    console.warn("sing.js: could not read yt-dlp version —", e.message);
+  }
+
+  try {
+    const updateOutput = execSync(`"${ytDlpBinPath}" -U`, { timeout: 30000 }).toString().trim();
+    console.log("sing.js: yt-dlp self-update output:", updateOutput);
+  } catch (e) {
+    console.warn("sing.js: yt-dlp self-update failed (may be network-restricted) —", e.message);
+  }
+
+  try {
+    const after = execSync(`"${ytDlpBinPath}" --version`).toString().trim();
+    console.log("sing.js: yt-dlp version (after update):", after);
+  } catch (e) {
+    console.warn("sing.js: could not read yt-dlp version after update —", e.message);
+  }
+}
+logAndUpdateYtDlp();
+
 module.exports = {
   config: {
     name: "sing",
     aliases: ["song", "music"],
-    version: "3.1",
+    version: "3.2",
     author: "Bright",
     countDown: 5,
     role: 0,
@@ -117,30 +155,54 @@ module.exports = {
     await fs.ensureDir(cacheDir);
     const filePath = path.join(cacheDir, `sing_dl_${Date.now()}.mp3`);
 
-    try {
-      const options = {
-        format: "bestaudio/best", // let yt-dlp pick a valid audio-only (or fallback) stream before extraction
-        extractAudio: true,
-        audioFormat: "mp3",
-        audioQuality: 0, // best
-        output: filePath,
-        noCheckCertificate: true,
-        noWarnings: true,
-        preferFreeFormats: true,
-        addHeader: ["referer:youtube.com"]
-      };
+    // Try a sequence of format strings, in case the video lacks some formats
+    const formatAttempts = ["bestaudio/best", "bestaudio*", "best"];
 
-      // Use cookies file only if it exists (optional fallback)
-      const cookiesExist = await fs.pathExists(cookiesFilePath);
-      console.log("sing.js: using cookies file?", cookiesExist);
-      if (cookiesExist) {
-        options.cookies = cookiesFilePath;
-      } else {
-        console.warn("sing.js: no cookies file found at download time — expect bot-check failures.");
+    let lastError = null;
+    let success = false;
+
+    for (const fmt of formatAttempts) {
+      try {
+        const options = {
+          format: fmt,
+          extractAudio: true,
+          audioFormat: "mp3",
+          audioQuality: 0, // best
+          output: filePath,
+          noCheckCertificate: true,
+          noWarnings: true,
+          preferFreeFormats: true,
+          addHeader: ["referer:youtube.com"]
+        };
+
+        const cookiesExist = await fs.pathExists(cookiesFilePath);
+        if (cookiesExist) {
+          options.cookies = cookiesFilePath;
+        } else {
+          console.warn("sing.js: no cookies file found at download time — expect bot-check failures.");
+        }
+
+        console.log(`sing.js: attempting download with format "${fmt}"`);
+        await youtubedl(selected.url, options);
+        success = true;
+        break;
+      } catch (e) {
+        lastError = e;
+        console.warn(`sing.js: format "${fmt}" failed —`, e.stderr || e.message);
+        await fs.remove(filePath).catch(() => {});
       }
+    }
 
-      await youtubedl(selected.url, options);
+    if (!success) {
+      console.error("sing.js download failed after all format attempts:", lastError?.stderr || lastError?.message);
+      await api.setMessageReaction("❌", event.messageID, threadID).catch((err) => {
+        console.error("sing.js setMessageReaction (❌) failed:", err.message);
+      });
+      message.reply(`Download error: ${lastError?.message || "unknown error"}`);
+      return;
+    }
 
+    try {
       await message.reply({
         body: selected.title,
         attachment: fs.createReadStream(filePath)
@@ -150,11 +212,9 @@ module.exports = {
         console.error("sing.js setMessageReaction (✅) failed:", e.message);
       });
     } catch (e) {
-      console.error("sing.js download failed:", e.stderr || e.message);
-      await api.setMessageReaction("❌", event.messageID, threadID).catch((err) => {
-        console.error("sing.js setMessageReaction (❌) failed:", err.message);
-      });
-      message.reply(`Download error: ${e.message}`);
+      console.error("sing.js failed to send audio reply:", e.message);
+      await api.setMessageReaction("❌", event.messageID, threadID).catch(() => {});
+      message.reply(`Download succeeded but sending failed: ${e.message}`);
     } finally {
       fs.remove(filePath).catch(() => {});
     }
