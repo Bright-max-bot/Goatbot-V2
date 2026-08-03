@@ -7,6 +7,30 @@ function getClient() {
   return ai;
 }
 
+// ============================================================
+// PER-THREAD CONVERSATION MEMORY (in-process, non-persistent)
+// Keyed by threadID. Stores alternating user/model turns so the
+// model has real short-term memory of the current conversation,
+// matching the "Memory" section of the system instruction.
+// Resets when the bot process restarts (not saved to disk).
+// ============================================================
+const MAX_TURNS = 10; // number of user+model exchanges kept per thread
+const history = new Map(); // threadID -> [{ role, parts: [{ text }] }, ...]
+
+function getHistory(threadID) {
+  return history.get(threadID) || [];
+}
+
+function pushTurn(threadID, userText, modelText) {
+  const thread = history.get(threadID) || [];
+  thread.push({ role: "user", parts: [{ text: userText }] });
+  thread.push({ role: "model", parts: [{ text: modelText }] });
+  // keep only the last MAX_TURNS exchanges (2 entries per exchange)
+  const excess = thread.length - MAX_TURNS * 2;
+  if (excess > 0) thread.splice(0, excess);
+  history.set(threadID, thread);
+}
+
 const SYSTEM_INSTRUCTION = `You are Nova, an advanced conversational AI assistant created and engineered by Bright Hemsworth.
 
 Your primary objective is to provide responses that are fast, accurate, intelligent, practical, and natural. Every response should maximize usefulness while minimizing unnecessary words. Always prioritize correctness over creativity.
@@ -330,7 +354,18 @@ module.exports.run = async function ({ api, event, args }) {
 Example:
 .zia Hello
 .zia Explain Quantum Physics
-.zia Write a JavaScript calculator`,
+.zia Write a JavaScript calculator
+
+Use ".zia clear" to reset the conversation memory for this thread.`,
+      event.threadID,
+      event.messageID
+    );
+  }
+
+  if (prompt.toLowerCase() === "clear" || prompt.toLowerCase() === "reset") {
+    history.delete(event.threadID);
+    return api.sendMessage(
+      "Conversation memory cleared for this thread.",
       event.threadID,
       event.messageID
     );
@@ -346,9 +381,15 @@ Example:
   }
 
   try {
+    const threadHistory = getHistory(event.threadID);
+    const contents = [
+      ...threadHistory,
+      { role: "user", parts: [{ text: prompt }] }
+    ];
+
     const result = await client.models.generateContent({
       model: "gemini-3.6-flash",
-      contents: prompt,
+      contents,
       config: {
         systemInstruction: SYSTEM_INSTRUCTION,
         ...GENERATION_CONFIG
@@ -368,6 +409,10 @@ Example:
     }
 
     if (!answer) answer = "No response.";
+
+    // Store the full (untruncated) exchange in memory before shortening
+    // the displayed message, so future turns keep accurate context.
+    pushTurn(event.threadID, prompt, answer);
 
     if (answer.length > 1900) {
       answer = answer.substring(0, 1850) + "\n\n[Response shortened]";
