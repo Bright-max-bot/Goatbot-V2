@@ -1,12 +1,18 @@
+const ytSearch = require("yt-search");
+const ytdl = require("@distube/ytdl-core");
+const ffmpegPath = require("ffmpeg-static");
+const ffmpeg = require("fluent-ffmpeg");
 const axios = require("axios");
 const fs = require("fs-extra");
 const path = require("path");
+
+ffmpeg.setFfmpegPath(ffmpegPath);
 
 module.exports = {
   config: {
     name: "sing",
     aliases: ["song", "music"],
-    version: "1.1",
+    version: "2.0",
     author: "Neoaz 🐊",
     countDown: 5,
     role: 0,
@@ -15,40 +21,53 @@ module.exports = {
     guide: { en: "{pn} <song name>" }
   },
 
-  onStart: async function ({ message, args, event, api, commandName }) {
+  onStart: async function ({ message, args, event, commandName }) {
     const query = args.join(" ");
     if (!query) return message.reply("Please provide a song name.");
 
+    let searchResult;
     try {
-      const res = await axios.get(`https://neokex-dlapis.vercel.app/api/search?q=${encodeURIComponent(query)}`);
-      const results = res.data.results.slice(0, 6);
+      searchResult = await ytSearch(query);
+    } catch (e) {
+      console.error("sing.js yt-search failed:", e.message);
+      return message.reply("Search failed — YouTube search is unavailable right now.");
+    }
 
-      if (results.length === 0) return message.reply("No songs found.");
+    const videos = searchResult?.videos;
+    if (!Array.isArray(videos) || videos.length === 0)
+      return message.reply("No songs found.");
 
-      let msg = "";
-      const attachments = [];
-      const cacheDir = path.join(__dirname, "cache");
-      await fs.ensureDir(cacheDir);
+    const topResults = videos.slice(0, 6);
+    const cacheDir = path.join(__dirname, "cache");
+    await fs.ensureDir(cacheDir);
 
-      for (let i = 0; i < results.length; i++) {
-        msg += `${i + 1}. ${results[i].title}\n[${results[i].duration}]\n\n`;
+    let msg = "";
+    const attachments = [];
+    for (let i = 0; i < topResults.length; i++) {
+      const v = topResults[i];
+      msg += `${i + 1}. ${v.title}\n[${v.timestamp}]\n\n`;
+      try {
         const imgPath = path.join(cacheDir, `sing_${Date.now()}_${i}.jpg`);
-        const imgRes = await axios.get(results[i].thumbnail, { responseType: "arraybuffer" });
+        const imgRes = await axios.get(v.thumbnail, { responseType: "arraybuffer" });
         await fs.writeFile(imgPath, Buffer.from(imgRes.data));
         attachments.push(fs.createReadStream(imgPath));
+      } catch (e) {
+        console.error("sing.js thumbnail fetch failed:", e.message);
       }
-
-      message.reply({ body: msg.trim(), attachment: attachments }, (err, info) => {
-        global.GoatBot.onReply.set(info.messageID, {
-          commandName,
-          author: event.senderID,
-          results
-        });
-        attachments.forEach(s => setTimeout(() => fs.remove(s.path).catch(() => {}), 10000));
-      });
-    } catch (e) {
-      message.reply("Search error.");
     }
+
+    message.reply({ body: msg.trim(), attachment: attachments.length ? attachments : undefined }, (err, info) => {
+      if (err) {
+        console.error("sing.js failed to send results message:", err);
+        return;
+      }
+      global.GoatBot.onReply.set(info.messageID, {
+        commandName,
+        author: event.senderID,
+        results: topResults.map(v => ({ title: v.title, url: v.url }))
+      });
+      attachments.forEach(s => setTimeout(() => fs.remove(s.path).catch(() => {}), 10000));
+    });
   },
 
   onReply: async function ({ message, event, Reply, api }) {
@@ -59,27 +78,23 @@ module.exports = {
     api.unsendMessage(event.messageReply.messageID);
     api.setMessageReaction("⏳", event.messageID);
 
+    const cacheDir = path.join(__dirname, "cache");
+    const filePath = path.join(cacheDir, `sing_dl_${Date.now()}.mp3`);
+
     try {
-      const dlRes = await axios.get(`https://neokex-dlapis.vercel.app/api/alldl?url=${encodeURIComponent(selected.url)}`);
-      const pollUrl = dlRes.data.audio.downloadUrl;
+      const isValid = await ytdl.validateURL(selected.url);
+      if (!isValid) throw new Error("Invalid YouTube URL.");
 
-      let streamUrl = null;
-      for (let i = 0; i < 60; i++) {
-        const statusRes = await axios.get(pollUrl);
-        if (statusRes.data.status === "completed") {
-          streamUrl = statusRes.data.viewUrl;
-          break;
-        }
-        await new Promise(r => setTimeout(r, 1000));
-      }
-
-      if (!streamUrl) throw new Error("Processing timeout.");
-
-      const cacheDir = path.join(__dirname, "cache");
-      const filePath = path.join(cacheDir, `${Date.now()}.mp3`);
-      
-      const fileRes = await axios.get(streamUrl, { responseType: "arraybuffer" });
-      await fs.writeFile(filePath, Buffer.from(fileRes.data));
+      await new Promise((resolve, reject) => {
+        const audioStream = ytdl(selected.url, { filter: "audioonly", quality: "highestaudio" });
+        audioStream.on("error", reject);
+        ffmpeg(audioStream)
+          .audioBitrate(128)
+          .format("mp3")
+          .on("error", reject)
+          .on("end", resolve)
+          .save(filePath);
+      });
 
       await message.reply({
         body: selected.title,
@@ -87,10 +102,12 @@ module.exports = {
       });
 
       api.setMessageReaction("✅", event.messageID);
-      fs.remove(filePath).catch(() => {});
     } catch (e) {
+      console.error("sing.js download failed:", e.message);
       api.setMessageReaction("❌", event.messageID);
-      message.reply("Download error.");
+      message.reply(`Download error: ${e.message}`);
+    } finally {
+      fs.remove(filePath).catch(() => {});
     }
   }
 };
