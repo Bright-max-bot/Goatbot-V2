@@ -7,7 +7,6 @@ function getClient() {
   return ai;
 }
 
-// Full Nova persona / behavior spec.
 const SYSTEM_INSTRUCTION = `You are Nova, an advanced conversational AI assistant created and engineered by Bright Hemsworth.
 
 Your primary objective is to provide responses that are fast, accurate, intelligent, practical, and natural. Every response should maximize usefulness while minimizing unnecessary words. Always prioritize correctness over creativity.
@@ -277,10 +276,29 @@ If there is a better solution than the one the user requested, politely suggest 
 
 Your goal is not merely to answer questions, but to consistently provide the best possible assistance while maintaining trust, accuracy, and a natural conversational experience.`;
 
+// ============================================================
+// GENERATION CONFIG
+// temperature 0.7 — natural variation without hurting accuracy.
+// topP 0.9 — keeps sampling within the most coherent token mass.
+// topK 40 — standard cutoff, avoids odd/rare token choices.
+// maxOutputTokens 2048 — enough for detailed answers/code without
+//   runaway length (messenger has its own character cap anyway).
+//
+// Note: Google's newer 3.x model docs list temperature/topP/topK
+// as deprecated in favor of newer sampling controls. Kept here for
+// broad SDK/model compatibility.
+// ============================================================
+const GENERATION_CONFIG = {
+  temperature: 0.7,
+  topP: 0.9,
+  topK: 40,
+  maxOutputTokens: 2048
+};
+
 module.exports.config = {
   name: "zia",
   aliases: ["nova", "asknova", "gemini"],
-  version: "3.4.0",
+  version: "3.6.0",
   author: "Bright Hemsworth",
   credits: "Bright Hemsworth",
   description: "Advanced AI Assistant powered by Google Gemini",
@@ -300,7 +318,6 @@ module.exports.config = {
 };
 
 module.exports.run = async function ({ api, event, args }) {
-  // Ignore messages sent by the bot's own account (prevents reply loops).
   const botID = api.getCurrentUserID ? api.getCurrentUserID() : null;
   if (botID && event.senderID === botID) return;
 
@@ -322,7 +339,7 @@ Example:
   const client = getClient();
   if (!client) {
     return api.sendMessage(
-`No Gemini API key is configured on this bot (GEMINI_API_KEY is missing). Get a free key at aistudio.google.com/apikey and set it as an environment variable, then restart the bot.`,
+      "No Gemini API key is configured on this bot (GEMINI_API_KEY is missing). Get a free key at aistudio.google.com/apikey and set it as an environment variable, then restart the bot.",
       event.threadID,
       event.messageID
     );
@@ -333,53 +350,53 @@ Example:
       model: "gemini-3.6-flash",
       contents: prompt,
       config: {
-        systemInstruction: SYSTEM_INSTRUCTION
+        systemInstruction: SYSTEM_INSTRUCTION,
+        ...GENERATION_CONFIG
       }
     });
 
     let answer =
       typeof result.text === "function"
         ? result.text()
-        : result.text ||
-          result.outputText ||
-          result.output_text ||
-          "No response.";
+        : result.text || result.outputText || result.output_text;
+
+    if (!answer) {
+      const parts = result?.candidates?.[0]?.content?.parts;
+      if (Array.isArray(parts)) {
+        answer = parts.map(p => p.text || "").join("").trim();
+      }
+    }
+
+    if (!answer) answer = "No response.";
 
     if (answer.length > 1900) {
       answer = answer.substring(0, 1850) + "\n\n[Response shortened]";
     }
 
-    return api.sendMessage(
-      answer,
-      event.threadID,
-      event.messageID
-    );
+    return api.sendMessage(answer, event.threadID, event.messageID);
 
   } catch (err) {
     console.error("Gemini raw error:", JSON.stringify(err, Object.getOwnPropertyNames(err)));
 
-    let error = err.message || "Unknown error";
+    const raw = err.message || "Unknown error";
+    let error;
 
-    if (error.includes("401") || error.includes("API_KEY_INVALID")) {
-      error = "Invalid Gemini API Key.";
-    }
-    else if (error.includes("403")) {
-      error = "Gemini API access denied — check that the Generative Language API is enabled for this key.";
-    }
-    else if (/model.*not found|model.*does not exist|no longer available/i.test(error)) {
-      error = "That Gemini model is unavailable or has been retired. Try updating the model name in the command file.";
-    }
-    else if (error.includes("429")) {
-      error = "Rate limit exceeded. Try again later.";
-    }
-    else if (error.includes("503")) {
-      error = "Gemini service unavailable.";
+    if (raw.includes("401") || raw.includes("API_KEY_INVALID")) {
+      error = "Invalid Gemini API key. Double-check GEMINI_API_KEY on the server.";
+    } else if (raw.includes("403")) {
+      error = "Gemini API access denied — make sure the Generative Language API is enabled for this key.";
+    } else if (/model.*not found|model.*does not exist|no longer available/i.test(raw)) {
+      error = "That Gemini model is unavailable or has been retired. Update the model name in the command file.";
+    } else if (raw.includes("429")) {
+      error = "Rate limit exceeded — too many requests. Try again in a bit.";
+    } else if (raw.includes("500")) {
+      error = "Gemini hit an internal error on Google's side. Try again shortly.";
+    } else if (raw.includes("503")) {
+      error = "Gemini service is temporarily unavailable. Try again shortly.";
+    } else {
+      error = raw;
     }
 
-    return api.sendMessage(
-      `ERROR: ${error}`,
-      event.threadID,
-      event.messageID
-    );
+    return api.sendMessage(`ERROR: ${error}`, event.threadID, event.messageID);
   }
 };
