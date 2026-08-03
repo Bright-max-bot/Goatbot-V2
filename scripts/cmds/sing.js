@@ -26,6 +26,12 @@ async function ensureCookiesFile() {
 }
 ensureCookiesFile();
 
+// --- DIAGNOSTIC: confirm what env vars this running process actually sees ---
+console.log(
+  "sing.js: YT_ env keys visible:",
+  Object.keys(process.env).filter((k) => k.startsWith("YT_"))
+);
+
 module.exports = {
   config: {
     name: "sing",
