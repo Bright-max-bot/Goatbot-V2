@@ -7,14 +7,21 @@ const { execSync } = require("child_process");
 
 const cookiesFilePath = path.join(__dirname, "cache", "cookies.txt");
 
-// Path to the yt-dlp binary that youtube-dl-exec vendors
-const ytDlpBinPath = path.join(
-  __dirname,
-  "node_modules",
-  "youtube-dl-exec",
-  "bin",
-  process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp"
-);
+// Resolve the yt-dlp binary via Node's module resolution instead of __dirname,
+// since node_modules is hoisted to the project root (/app/node_modules),
+// not this command file's own folder (/app/scripts/cmds).
+let ytDlpBinPath = null;
+try {
+  const pkgJsonPath = require.resolve("youtube-dl-exec/package.json");
+  const pkgDir = path.dirname(pkgJsonPath);
+  ytDlpBinPath = path.join(
+    pkgDir,
+    "bin",
+    process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp"
+  );
+} catch (e) {
+  console.warn("sing.js: could not resolve youtube-dl-exec package path —", e.message);
+}
 
 async function ensureCookiesFile() {
   if (await fs.pathExists(cookiesFilePath)) return;
@@ -39,10 +46,12 @@ console.log(
 );
 
 // --- Log current yt-dlp binary version, then attempt a self-update ---
-// A stale bundled yt-dlp binary is a common cause of
-// "Requested format is not available" even when auth/cookies are fine,
-// since YouTube frequently changes its player response format.
 function logAndUpdateYtDlp() {
+  if (!ytDlpBinPath || !fs.existsSync(ytDlpBinPath)) {
+    console.warn("sing.js: yt-dlp binary not found at resolved path:", ytDlpBinPath);
+    return;
+  }
+
   try {
     const before = execSync(`"${ytDlpBinPath}" --version`).toString().trim();
     console.log("sing.js: yt-dlp version (before update):", before);
@@ -70,7 +79,7 @@ module.exports = {
   config: {
     name: "sing",
     aliases: ["song", "music"],
-    version: "3.2",
+    version: "3.3",
     author: "Bright",
     countDown: 5,
     role: 0,
