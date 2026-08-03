@@ -52,10 +52,11 @@
     "youtube-dl-exec": "^3.1.9"
   },
   "scripts": {
-    "start": "node index.js",
-    "dev": "NODE_ENV=development node index.js",
-    "prod": "NODE_ENV=production node index.js"
-  },
+  "start": "node index.js",
+  "dev": "NODE_ENV=development node index.js",
+  "prod": "NODE_ENV=production node index.js",
+  "postinstall": "node -e \"try{require('child_process').execSync('node_modules/youtube-dl-exec/bin/yt-dlp -U',{stdio:'inherit'})}catch(e){console.warn('yt-dlp postinstall update failed:', e.message)}\""
+},
   "author": "Bright Hemsworth",
   "license": "MIT",
   "repository": {
