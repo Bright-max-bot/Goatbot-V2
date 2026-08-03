@@ -4,12 +4,27 @@ const axios = require("axios");
 const fs = require("fs-extra");
 const path = require("path");
 
-// --- Optional cookies support ---
-// If a cache/cookies.txt file exists (Netscape-format cookies.txt, NOT the
-// JSON export), it's passed to yt-dlp automatically. yt-dlp handles
-// YouTube's bot-check well on its own in most cases, so this is a
-// fallback rather than a requirement.
+// --- Cookies support (needed to pass YouTube's bot-check) ---
+// YT_COOKIES_B64 = base64-encoded Netscape-format cookies.txt, set as a
+// Render environment variable. Decoded to a real file once at startup.
 const cookiesFilePath = path.join(__dirname, "cache", "cookies.txt");
+
+async function ensureCookiesFile() {
+  if (await fs.pathExists(cookiesFilePath)) return;
+  if (!process.env.YT_COOKIES_B64) {
+    console.warn("sing.js: YT_COOKIES_B64 not set — downloads will likely fail with bot-check errors.");
+    return;
+  }
+  try {
+    await fs.ensureDir(path.dirname(cookiesFilePath));
+    const decoded = Buffer.from(process.env.YT_COOKIES_B64, "base64").toString("utf8");
+    await fs.writeFile(cookiesFilePath, decoded);
+    console.log("sing.js: cookies.txt written from YT_COOKIES_B64");
+  } catch (e) {
+    console.error("sing.js: failed to write cookies.txt —", e.message);
+  }
+}
+ensureCookiesFile();
 
 module.exports = {
   config: {
