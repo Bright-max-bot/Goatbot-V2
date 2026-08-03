@@ -1,4 +1,6 @@
-import { join } from "path";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
+import { existsSync, mkdirSync } from "fs";
 import { loadImage, createCanvas } from "canvas";
 
 export const config = {
@@ -10,12 +12,24 @@ export const config = {
     cooldown: 5
 };
 
-const arrestPath = join(global.assetsPath, "arrest-template.png");
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+function getAssetsDir() {
+    const dir = global.assetsPath || join(__dirname, "assets");
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    return dir;
+}
+
+function getArrestPath() {
+    return join(getAssetsDir(), "arrest-template.png");
+}
+
 export async function onLoad() {
-    global.downloadFile(arrestPath, "https://i.imgur.com/ep1gG3r.png");
+    await global.downloadFile(getArrestPath(), "https://i.imgur.com/ep1gG3r.png");
 }
 
 export async function makeImage({ one, two }) {
+    const arrestPath = getArrestPath();
     const template = await loadImage(arrestPath);
 
     let avatarPathOne = join(global.cachePath, `avt_arr_${one}.png`);
@@ -37,8 +51,7 @@ export async function makeImage({ one, two }) {
     ctx.drawImage(avatarOneCircle, 375, 9, 100, 100);
     ctx.drawImage(avatarTwoCircle, 160, 92, 100, 100);
 
-
-    const pathImg = join(global.cachePath, `marry_${one}_${two}.png`);
+    const pathImg = join(global.cachePath, `arrest_${one}_${two}.png`);
     const imageBuffer = canvas.toBuffer();
 
     global.deleteFile(avatarPathOne);

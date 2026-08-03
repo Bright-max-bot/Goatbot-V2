@@ -1,4 +1,6 @@
-import { join } from "path";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
+import { existsSync, mkdirSync } from "fs";
 import { loadImage, createCanvas } from "canvas";
 
 export const config = {
@@ -10,12 +12,24 @@ export const config = {
     cooldown: 5
 };
 
-const datePath = join(global.assetsPath, "date-template.png");
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+function getAssetsDir() {
+    const dir = global.assetsPath || join(__dirname, "assets");
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    return dir;
+}
+
+function getDatePath() {
+    return join(getAssetsDir(), "date-template.png");
+}
+
 export async function onLoad() {
-    global.downloadFile(datePath, "https://i.pinimg.com/736x/15/fa/9d/15fa9d71cdd07486bb6f728dae2fb264.jpg");
+    await global.downloadFile(getDatePath(), "https://i.pinimg.com/736x/15/fa/9d/15fa9d71cdd07486bb6f728dae2fb264.jpg");
 }
 
 export async function makeImage({ one, two }) {
+    const datePath = getDatePath();
     const template = await loadImage(datePath);
 
     let avatarPathOne = join(global.cachePath, `avt_date_${one}.png`);
@@ -37,7 +51,7 @@ export async function makeImage({ one, two }) {
     ctx.drawImage(avatarOneCircle, 355, 100, 85, 85);
     ctx.drawImage(avatarTwoCircle, 250, 140, 75, 75);
 
-    const pathImg = join(global.cachePath, `marry_${one}_${two}.png`);
+    const pathImg = join(global.cachePath, `date_${one}_${two}.png`);
     const imageBuffer = canvas.toBuffer();
 
     global.deleteFile(avatarPathOne);

@@ -1,4 +1,6 @@
-import { join } from "path";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
+import { existsSync, mkdirSync } from "fs";
 
 export const config = {
     name: "pair",
@@ -7,13 +9,30 @@ export const config = {
     cooldown: 15
 };
 
-const lovePath = join(global.assetsPath, "love_pairing.png");
+// ESM has no __dirname — derive it from the module's own URL.
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// global.assetsPath may not be set (or not set yet) when this module
+// loads. Resolve it lazily — inside a function, not at module scope —
+// so it's only read once it's actually needed, and fall back to a
+// local "assets" folder next to this file if it's still missing.
+function getAssetsDir() {
+    const dir = global.assetsPath || join(__dirname, "assets");
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    return dir;
+}
+
+function getLovePath() {
+    return join(getAssetsDir(), "love_pairing.png");
+}
+
 export async function onLoad() {
-    global.downloadFile(lovePath, "https://i.ibb.co/2g0wdVV/heart-icon-14.png").catch(console.error);
+    await global.downloadFile(getLovePath(), "https://i.ibb.co/2g0wdVV/heart-icon-14.png").catch(console.error);
 }
 
 export async function onCall({ message }) {
     try {
+        const lovePath = getLovePath();
         const { participantIDs, senderID } = message;
         const botID = api.getCurrentUserID();
         const listUserID = participantIDs.filter(ID => ID != botID && ID != senderID);
@@ -29,8 +48,10 @@ export async function onCall({ message }) {
             { id: id, tag: name }
         ]
 
-        const avtPath = join(global.cachePath, `${senderID}.png`);
-        const avtPath2 = join(global.cachePath, `${id}.png`);
+        // Prefixed with "pair_" so this doesn't collide with another
+        // command's cache files for the same user IDs.
+        const avtPath = join(global.cachePath, `pair_${senderID}.png`);
+        const avtPath2 = join(global.cachePath, `pair_${id}.png`);
 
         await global.downloadFile(avtPath, global.getAvatarURL(senderID));
         await global.downloadFile(avtPath2, global.getAvatarURL(id));

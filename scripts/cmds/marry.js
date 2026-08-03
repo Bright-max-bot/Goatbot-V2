@@ -1,4 +1,6 @@
-import { join } from "path";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
+import { existsSync, mkdirSync } from "fs";
 import { loadImage, createCanvas } from "canvas";
 
 export const config = {
@@ -10,16 +12,28 @@ export const config = {
     cooldown: 5
 };
 
-const marryPath = join(global.assetsPath, "marrywi.png");
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+function getAssetsDir() {
+    const dir = global.assetsPath || join(__dirname, "assets");
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    return dir;
+}
+
+function getMarryPath() {
+    return join(getAssetsDir(), "marrywi.png");
+}
+
 export async function onLoad() {
-    global.downloadFile(marryPath, "https://i.ibb.co/VDrz7Q9/336377253-520155543604186-3362317639442779902-n.png");
+    await global.downloadFile(getMarryPath(), "https://i.ibb.co/VDrz7Q9/336377253-520155543604186-3362317639442779902-n.png");
 }
 
 export async function makeImage({ one, two }) {
+    const marryPath = getMarryPath();
     const template = await loadImage(marryPath);
 
-    let avatarPathOne = join(global.cachePath, `avt_${one}.png`);
-    let avatarPathTwo = join(global.cachePath, `avt_${two}.png`);
+    let avatarPathOne = join(global.cachePath, `avt_marry_${one}.png`);
+    let avatarPathTwo = join(global.cachePath, `avt_marry_${two}.png`);
 
     await global.downloadFile(avatarPathOne, global.getAvatarURL(one));
     await global.downloadFile(avatarPathTwo, global.getAvatarURL(two));
