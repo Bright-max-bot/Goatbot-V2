@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y \
 
 COPY package*.json ./
 
-RUN npm install -g npm@latest
+RUN npm install -g npm@10
 
 ENV YOUTUBE_DL_SKIP_PYTHON_CHECK=1
 ENV YOUTUBE_DL_SKIP_DOWNLOAD=true
