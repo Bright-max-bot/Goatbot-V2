@@ -1,33 +1,21 @@
 const ytSearch = require("yt-search");
-const ytdl = require("@distube/ytdl-core");
-const ffmpegPath = require("ffmpeg-static");
-const ffmpeg = require("fluent-ffmpeg");
+const youtubedl = require("youtube-dl-exec");
 const axios = require("axios");
 const fs = require("fs-extra");
 const path = require("path");
 
-ffmpeg.setFfmpegPath(ffmpegPath);
-
-// --- YouTube cookie agent (fixes "Sign in to confirm you're not a bot") ---
-// Set YT_COOKIES in Render's Environment tab to the minified cookies array
-// (just the array, not the {url, cookies} wrapper) exported from a
-// logged-in YouTube session.
-let ytAgent = null;
-if (process.env.YT_COOKIES) {
-  try {
-    ytAgent = ytdl.createAgent(JSON.parse(process.env.YT_COOKIES));
-  } catch (e) {
-    console.error("sing.js: failed to parse YT_COOKIES —", e.message);
-  }
-} else {
-  console.warn("sing.js: YT_COOKIES not set — downloads may fail with bot-check errors.");
-}
+// --- Optional cookies support ---
+// If a cache/cookies.txt file exists (Netscape-format cookies.txt, NOT the
+// JSON export), it's passed to yt-dlp automatically. yt-dlp handles
+// YouTube's bot-check well on its own in most cases, so this is a
+// fallback rather than a requirement.
+const cookiesFilePath = path.join(__dirname, "cache", "cookies.txt");
 
 module.exports = {
   config: {
     name: "sing",
     aliases: ["song", "music"],
-    version: "2.1",
+    version: "3.0",
     author: "Bright",
     countDown: 5,
     role: 0,
@@ -98,23 +86,23 @@ module.exports = {
     const filePath = path.join(cacheDir, `sing_dl_${Date.now()}.mp3`);
 
     try {
-      const isValid = await ytdl.validateURL(selected.url);
-      if (!isValid) throw new Error("Invalid YouTube URL.");
+      const options = {
+        extractAudio: true,
+        audioFormat: "mp3",
+        audioQuality: 0, // best
+        output: filePath,
+        noCheckCertificate: true,
+        noWarnings: true,
+        preferFreeFormats: true,
+        addHeader: ["referer:youtube.com", "user-agent:googlebot"]
+      };
 
-      await new Promise((resolve, reject) => {
-        const audioStream = ytdl(selected.url, {
-          filter: "audioonly",
-          quality: "highestaudio",
-          agent: ytAgent
-        });
-        audioStream.on("error", reject);
-        ffmpeg(audioStream)
-          .audioBitrate(128)
-          .format("mp3")
-          .on("error", reject)
-          .on("end", resolve)
-          .save(filePath);
-      });
+      // Use cookies file only if it exists (optional fallback)
+      if (await fs.pathExists(cookiesFilePath)) {
+        options.cookies = cookiesFilePath;
+      }
+
+      await youtubedl(selected.url, options);
 
       await message.reply({
         body: selected.title,
@@ -123,7 +111,7 @@ module.exports = {
 
       api.setMessageReaction("✅", event.messageID);
     } catch (e) {
-      console.error("sing.js download failed:", e.message);
+      console.error("sing.js download failed:", e.stderr || e.message);
       api.setMessageReaction("❌", event.messageID);
       message.reply(`Download error: ${e.message}`);
     } finally {
