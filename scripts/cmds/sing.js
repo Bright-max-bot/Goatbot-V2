@@ -93,8 +93,23 @@ module.exports = {
     if (isNaN(choice) || choice < 1 || choice > Reply.results.length) return;
 
     const selected = Reply.results[choice - 1];
-    api.unsendMessage(event.messageReply.messageID);
-    api.setMessageReaction("⏳", event.messageID);
+    const threadID = event.threadID;
+
+    // Safely unsend the previous prompt message, if it exists
+    try {
+      if (event.messageReply?.messageID) {
+        await api.unsendMessage(event.messageReply.messageID, threadID);
+      }
+    } catch (e) {
+      console.error("sing.js unsendMessage failed:", e.message);
+    }
+
+    // Safely react with an hourglass while downloading
+    try {
+      await api.setMessageReaction("⏳", event.messageID, threadID);
+    } catch (e) {
+      console.error("sing.js setMessageReaction (⏳) failed:", e.message);
+    }
 
     const cacheDir = path.join(__dirname, "cache");
     await fs.ensureDir(cacheDir);
@@ -109,12 +124,16 @@ module.exports = {
         noCheckCertificate: true,
         noWarnings: true,
         preferFreeFormats: true,
-        addHeader: ["referer:youtube.com", "user-agent:googlebot"]
+        addHeader: ["referer:youtube.com"]
       };
 
       // Use cookies file only if it exists (optional fallback)
-      if (await fs.pathExists(cookiesFilePath)) {
+      const cookiesExist = await fs.pathExists(cookiesFilePath);
+      console.log("sing.js: using cookies file?", cookiesExist);
+      if (cookiesExist) {
         options.cookies = cookiesFilePath;
+      } else {
+        console.warn("sing.js: no cookies file found at download time — expect bot-check failures.");
       }
 
       await youtubedl(selected.url, options);
@@ -124,10 +143,14 @@ module.exports = {
         attachment: fs.createReadStream(filePath)
       });
 
-      api.setMessageReaction("✅", event.messageID);
+      await api.setMessageReaction("✅", event.messageID, threadID).catch((e) => {
+        console.error("sing.js setMessageReaction (✅) failed:", e.message);
+      });
     } catch (e) {
       console.error("sing.js download failed:", e.stderr || e.message);
-      api.setMessageReaction("❌", event.messageID);
+      await api.setMessageReaction("❌", event.messageID, threadID).catch((err) => {
+        console.error("sing.js setMessageReaction (❌) failed:", err.message);
+      });
       message.reply(`Download error: ${e.message}`);
     } finally {
       fs.remove(filePath).catch(() => {});
