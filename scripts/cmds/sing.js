@@ -8,12 +8,27 @@ const path = require("path");
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 
+// --- YouTube cookie agent (fixes "Sign in to confirm you're not a bot") ---
+// Set YT_COOKIES in Render's Environment tab to the minified cookies array
+// (just the array, not the {url, cookies} wrapper) exported from a
+// logged-in YouTube session.
+let ytAgent = null;
+if (process.env.YT_COOKIES) {
+  try {
+    ytAgent = ytdl.createAgent(JSON.parse(process.env.YT_COOKIES));
+  } catch (e) {
+    console.error("sing.js: failed to parse YT_COOKIES —", e.message);
+  }
+} else {
+  console.warn("sing.js: YT_COOKIES not set — downloads may fail with bot-check errors.");
+}
+
 module.exports = {
   config: {
     name: "sing",
     aliases: ["song", "music"],
-    version: "2.0",
-    author: "Neoaz 🐊",
+    version: "2.1",
+    author: "Bright",
     countDown: 5,
     role: 0,
     shortDescription: { en: "Search and download YouTube audio" },
@@ -79,6 +94,7 @@ module.exports = {
     api.setMessageReaction("⏳", event.messageID);
 
     const cacheDir = path.join(__dirname, "cache");
+    await fs.ensureDir(cacheDir);
     const filePath = path.join(cacheDir, `sing_dl_${Date.now()}.mp3`);
 
     try {
@@ -86,7 +102,11 @@ module.exports = {
       if (!isValid) throw new Error("Invalid YouTube URL.");
 
       await new Promise((resolve, reject) => {
-        const audioStream = ytdl(selected.url, { filter: "audioonly", quality: "highestaudio" });
+        const audioStream = ytdl(selected.url, {
+          filter: "audioonly",
+          quality: "highestaudio",
+          agent: ytAgent
+        });
         audioStream.on("error", reject);
         ffmpeg(audioStream)
           .audioBitrate(128)
