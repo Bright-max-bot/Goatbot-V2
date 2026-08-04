@@ -34,23 +34,36 @@ RUN npm install -g npm@10
 ENV YOUTUBE_DL_SKIP_PYTHON_CHECK=1
 ENV YOUTUBE_DL_SKIP_DOWNLOAD=true
 
-# Make registry fetches resilient to transient DNS/network blips, without
-# padding failures out to many minutes while we're still diagnosing.
+# Force the real, universally-reachable public registry. package-lock.json
+# was generated inside a Replit workspace, where Replit's Package Firewall
+# (Socket) transparently rewrites every "resolved" URL to point at the
+# internal host package-firewall.replit.local. That host is unreachable
+# from this isolated Docker build container, which is what caused every
+# ENOTFOUND above and, in turn, npm's "Exit handler never called!" bug.
+# Setting this as an env var overrides any .npmrc (including one baked
+# into the repo) that might otherwise point back at the internal proxy.
+ENV NPM_CONFIG_REGISTRY=https://registry.npmjs.org
+
 ENV NPM_CONFIG_FETCH_RETRIES=2
 ENV NPM_CONFIG_FETCH_RETRY_MINTIMEOUT=10000
 ENV NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT=30000
 
 COPY package.json package-lock.json ./
 
-# DIAGNOSTIC MODE: package-lock.json is still out of sync with package.json,
-# which is forcing npm to fully re-resolve the tree (see chat explanation) —
-# that's the top suspect for the ~500s hang you just hit. --loglevel=verbose
-# streams every registry request straight to the build log, and the `||`
-# fallback dumps npm's internal debug log (the file the generic "Exit
-# handler never called!" message points to but Docker normally discards on
-# failure) so we can see the ACTUAL underlying error instead of the mask.
-# Once the real cause is identified and the lockfile is regenerated, replace
-# this whole line with:
+# One-time repair: rewrite every lockfile "resolved" URL from Replit's
+# internal Package Firewall host back to the real npm registry. The path
+# structure is identical (/npm/<pkg>/-/<pkg>-<version>.tgz maps 1:1 onto
+# registry.npmjs.org's own tarball layout) — this is a pure host swap.
+RUN sed -i 's#http://package-firewall\.replit\.local/npm/#https://registry.npmjs.org/#g' package-lock.json
+
+# DIAGNOSTIC MODE: package-lock.json is still out of sync with package.json
+# (see chat explanation) — `npm ci` will refuse to run until that's fixed.
+# --loglevel=verbose streams every registry request straight to the build
+# log, and the `||` fallback dumps npm's internal debug log so we can see
+# the real underlying error if anything still goes wrong.
+# Once package-lock.json is properly regenerated (ideally outside any
+# Replit-proxied environment, so its resolved URLs are correct from the
+# start), replace this whole line with:
 #   RUN npm ci --no-audit --no-fund
 RUN npm install --no-audit --no-fund --loglevel=verbose \
  || (echo "----- NPM DEBUG LOG -----"; cat /root/.npm/_logs/*-debug-0.log; exit 1)
