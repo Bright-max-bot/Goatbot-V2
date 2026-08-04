@@ -436,7 +436,7 @@ function findGreetingReply(prompt) {
   return null;
 }
 
-const ADMIN_IDS = [];
+const ADMIN_IDS = ["100065959714609"];
 
 function isBotAdmin(senderID) {
   const configured = (global.config && Array.isArray(global.config.adminBot))
