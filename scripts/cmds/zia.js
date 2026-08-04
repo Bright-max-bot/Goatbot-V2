@@ -3,7 +3,14 @@ const { GoogleGenAI } = require("@google/genai");
 const MAX_TURNS = 10;
 const MAX_MESSAGE_LENGTH = 1900;
 const TRUNCATE_LENGTH = 1850;
-const MODEL_NAME = "gemini-3.6-flash";
+const MAX_PROMPT_LENGTH = 4000;
+const DEFAULT_MODEL_NAME = "gemini-3.6-flash";
+
+const RATE_LIMIT_MAX_REQUESTS = 6;
+const RATE_LIMIT_WINDOW_MS = 60 * 1000;
+
+const RETRY_MAX_ATTEMPTS = 3;
+const RETRY_BASE_DELAY_MS = 1000;
 
 const GENERATION_CONFIG = {
   temperature: 0.7,
@@ -281,6 +288,7 @@ If there is a better solution than the one the user requested, politely suggest 
 
 Your goal is not merely to answer questions, but to consistently provide the best possible assistance while maintaining trust, accuracy, and a natural conversational experience.`;
 
+
 class GeminiClient {
   constructor() {
     this._client = null;
@@ -319,10 +327,115 @@ class ThreadMemory {
   clear(threadID) {
     this.store.delete(threadID);
   }
+
+  threadCount() {
+    return this.store.size;
+  }
+
+  totalTurns() {
+    let total = 0;
+    for (const thread of this.store.values()) {
+      total += thread.length / 2;
+    }
+    return total;
+  }
+}
+
+class RateLimiter {
+  constructor(maxRequests, windowMs) {
+    this.maxRequests = maxRequests;
+    this.windowMs = windowMs;
+    this.hits = new Map();
+  }
+
+  check(userID) {
+    const now = Date.now();
+    const timestamps = (this.hits.get(userID) || []).filter(
+      ts => now - ts < this.windowMs
+    );
+
+    if (timestamps.length >= this.maxRequests) {
+      const oldestActive = timestamps[0];
+      const retryAfterMs = this.windowMs - (now - oldestActive);
+      this.hits.set(userID, timestamps);
+      return { allowed: false, retryAfterMs };
+    }
+
+    timestamps.push(now);
+    this.hits.set(userID, timestamps);
+    return { allowed: true, retryAfterMs: 0 };
+  }
+
+  activeUserCount() {
+    const now = Date.now();
+    let count = 0;
+    for (const timestamps of this.hits.values()) {
+      if (timestamps.some(ts => now - ts < this.windowMs)) count += 1;
+    }
+    return count;
+  }
+}
+
+class ThreadBlacklist {
+  constructor() {
+    this.threadIDs = new Set();
+  }
+
+  add(threadID) {
+    this.threadIDs.add(String(threadID));
+  }
+
+  remove(threadID) {
+    return this.threadIDs.delete(String(threadID));
+  }
+
+  has(threadID) {
+    return this.threadIDs.has(String(threadID));
+  }
+
+  list() {
+    return Array.from(this.threadIDs);
+  }
+}
+
+class PersonaStore {
+  constructor() {
+    this.overrides = new Map();
+  }
+
+  set(threadID, text) {
+    this.overrides.set(threadID, text);
+  }
+
+  get(threadID) {
+    return this.overrides.get(threadID) || null;
+  }
+
+  clear(threadID) {
+    return this.overrides.delete(threadID);
+  }
+}
+
+class ModelRegistry {
+  constructor(defaultModel) {
+    this.currentModel = defaultModel;
+  }
+
+  get() {
+    return this.currentModel;
+  }
+
+  set(modelName) {
+    this.currentModel = modelName;
+  }
 }
 
 const geminiClient = new GeminiClient();
 const threadMemory = new ThreadMemory(MAX_TURNS);
+const rateLimiter = new RateLimiter(RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_MS);
+const threadBlacklist = new ThreadBlacklist();
+const personaStore = new PersonaStore();
+const modelRegistry = new ModelRegistry(DEFAULT_MODEL_NAME);
 
 function extractAnswerText(result) {
   let answer =
@@ -355,7 +468,7 @@ function resolveErrorMessage(err) {
     return "Gemini API access denied — make sure the Generative Language API is enabled for this key.";
   }
   if (/model.*not found|model.*does not exist|no longer available/i.test(raw)) {
-    return "That Gemini model is unavailable or has been retired. Update the model name in the command file.";
+    return "That Gemini model is unavailable or has been retired. Update the model name with \".zia model <name>\".";
   }
   if (raw.includes("429")) {
     return "Rate limit exceeded — too many requests. Try again in a bit.";
@@ -367,6 +480,36 @@ function resolveErrorMessage(err) {
     return "Gemini service is temporarily unavailable. Try again shortly.";
   }
   return raw;
+}
+
+function isRetryableError(err) {
+  const raw = err.message || "";
+  return raw.includes("429") || raw.includes("503");
+}
+
+function wait(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function generateWithRetry(client, params) {
+  let attempt = 0;
+  let lastError = null;
+
+  while (attempt < RETRY_MAX_ATTEMPTS) {
+    try {
+      return await client.models.generateContent(params);
+    } catch (err) {
+      lastError = err;
+      if (!isRetryableError(err) || attempt === RETRY_MAX_ATTEMPTS - 1) {
+        throw err;
+      }
+      const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
+      await wait(delay);
+      attempt += 1;
+    }
+  }
+
+  throw lastError;
 }
 
 const GREETING_RULES = [
@@ -445,13 +588,31 @@ function isBotAdmin(senderID) {
   return configured.includes(String(senderID));
 }
 
+async function isThreadAdmin(api, threadID, senderID) {
+  if (isBotAdmin(senderID)) return true;
+  try {
+    const threadInfo = await api.getThreadInfo(threadID);
+    const adminIDs = (threadInfo?.adminIDs || []).map(entry =>
+      typeof entry === "string" ? entry : entry.id
+    );
+    return adminIDs.includes(String(senderID));
+  } catch (err) {
+    console.error("Failed to fetch thread info for admin check:", err.message || err);
+    return false;
+  }
+}
+
 const ZIA_UPDATE_LOG = {
-  version: "3.6.0",
+  version: "3.7.0",
   changes: [
     "Rebuilt the internal code structure into clean, reusable classes and functions.",
-    "Added random varied replies for greetings like Hi, Hello, Good Morning, Good Afternoon, Good Evening, Goodnight, and Breakfast — no more repeating the same line every time.",
-    "Improved error handling so issues (invalid key, rate limits, retired models) are easier to understand at a glance.",
-    "Added an admin broadcast system to announce updates like this one to every group the bot is in."
+    "Added random varied replies for greetings like Hi, Hello, Good Morning, Good Afternoon, Good Evening, Goodnight, and Breakfast.",
+    "Added an admin broadcast system to announce updates to every group the bot is in.",
+    "Added per-user rate limiting, an input length cap, and automatic retry with backoff on rate-limit/server errors.",
+    "Added image understanding — attach or reply to a photo with .zia and Nova can see it.",
+    "Added reply-context awareness — replying to a message with .zia gives Nova that message as context.",
+    "Added mention trigger — tag the bot directly instead of typing the command prefix.",
+    "Added per-thread persona overrides, hot-swappable models, a thread blacklist, and admin stats via .zia help."
   ]
 };
 
@@ -480,7 +641,7 @@ async function broadcastToAllGroups(api, message, delayMs = 800) {
       console.error(`Broadcast failed for thread ${threadID}:`, err.message || err);
     }
     if (delayMs > 0) {
-      await new Promise(resolve => setTimeout(resolve, delayMs));
+      await wait(delayMs);
     }
   }
 
@@ -513,6 +674,214 @@ async function handleUpdateBroadcast(api, event) {
   );
 }
 
+function collectImageAttachments(event) {
+  const fromMessage = Array.isArray(event.attachments) ? event.attachments : [];
+  const fromReply = Array.isArray(event.messageReply?.attachments)
+    ? event.messageReply.attachments
+    : [];
+
+  return [...fromMessage, ...fromReply].filter(att =>
+    att && (att.type === "photo" || att.type === "image" || att.type === "sticker")
+  );
+}
+
+async function attachmentToImagePart(attachment) {
+  const url = attachment.url || attachment.previewUrl || attachment.largePreviewUrl;
+  if (!url) return null;
+
+  const response = await fetch(url);
+  if (!response.ok) return null;
+
+  const contentType = response.headers.get("content-type") || "image/jpeg";
+  const arrayBuffer = await response.arrayBuffer();
+  const base64Data = Buffer.from(arrayBuffer).toString("base64");
+
+  return {
+    inlineData: {
+      mimeType: contentType.split(";")[0],
+      data: base64Data
+    }
+  };
+}
+
+async function buildImageParts(event) {
+  const attachments = collectImageAttachments(event);
+  const parts = [];
+
+  for (const attachment of attachments) {
+    try {
+      const part = await attachmentToImagePart(attachment);
+      if (part) parts.push(part);
+    } catch (err) {
+      console.error("Failed to fetch image attachment:", err.message || err);
+    }
+  }
+
+  return parts;
+}
+
+function buildReplyContextPrefix(event) {
+  const repliedBody = event.messageReply?.body;
+  if (!repliedBody) return "";
+  return `[Replying to this earlier message: "${repliedBody}"]\n\n`;
+}
+
+const HELP_TEXT = `🤖 ZIA / NOVA — Command List
+
+.zia [question] — Ask Nova anything. Reply to a message or attach a photo to give it context.
+.zia clear (or reset) — Clear this thread's conversation memory.
+.zia help — Show this command list.
+
+Admin (thread admins):
+.zia persona [tone/instructions] — Set a custom tone override for this thread.
+.zia persona show — View this thread's current persona override.
+.zia persona reset — Remove this thread's persona override.
+
+Admin (bot admins only):
+.zia model [name] — View or hot-swap the Gemini model.
+.zia blacklist add|remove|list — Manage which threads Nova ignores.
+.zia stats — Show usage stats across all threads.
+.zia update — Broadcast the latest changelog to every group.
+
+Tip: you can also just tag/mention the bot directly instead of typing ".zia".`;
+
+async function handleHelpCommand(api, event) {
+  return api.sendMessage(HELP_TEXT, event.threadID, event.messageID);
+}
+
+async function handleModelCommand(api, event, rest) {
+  if (!isBotAdmin(event.senderID)) {
+    return api.sendMessage("Only bot admins can change the model.", event.threadID, event.messageID);
+  }
+
+  const modelName = rest.trim();
+  if (!modelName) {
+    return api.sendMessage(`Current model: ${modelRegistry.get()}`, event.threadID, event.messageID);
+  }
+
+  modelRegistry.set(modelName);
+  return api.sendMessage(`Model switched to: ${modelName}`, event.threadID, event.messageID);
+}
+
+async function handlePersonaCommand(api, event, rest) {
+  const allowed = await isThreadAdmin(api, event.threadID, event.senderID);
+  if (!allowed) {
+    return api.sendMessage(
+      "Only this group's admins (or bot admins) can change its persona.",
+      event.threadID,
+      event.messageID
+    );
+  }
+
+  const value = rest.trim();
+
+  if (!value || value.toLowerCase() === "show") {
+    const current = personaStore.get(event.threadID);
+    return api.sendMessage(
+      current ? `Current persona override for this thread:\n"${current}"` : "No persona override set for this thread.",
+      event.threadID,
+      event.messageID
+    );
+  }
+
+  if (value.toLowerCase() === "reset" || value.toLowerCase() === "clear") {
+    personaStore.clear(event.threadID);
+    return api.sendMessage("Persona override cleared for this thread.", event.threadID, event.messageID);
+  }
+
+  personaStore.set(event.threadID, value);
+  return api.sendMessage(`Persona override set for this thread:\n"${value}"`, event.threadID, event.messageID);
+}
+
+async function handleBlacklistCommand(api, event, rest) {
+  if (!isBotAdmin(event.senderID)) {
+    return api.sendMessage("Only bot admins can manage the blacklist.", event.threadID, event.messageID);
+  }
+
+  const [action, targetThreadID] = rest.trim().split(/\s+/);
+  const threadID = targetThreadID || event.threadID;
+
+  if (action === "add") {
+    threadBlacklist.add(threadID);
+    return api.sendMessage(`Thread ${threadID} added to the blacklist. Nova will ignore it.`, event.threadID, event.messageID);
+  }
+
+  if (action === "remove") {
+    const removed = threadBlacklist.remove(threadID);
+    return api.sendMessage(
+      removed ? `Thread ${threadID} removed from the blacklist.` : `Thread ${threadID} was not blacklisted.`,
+      event.threadID,
+      event.messageID
+    );
+  }
+
+  if (action === "list") {
+    const list = threadBlacklist.list();
+    return api.sendMessage(
+      list.length ? `Blacklisted threads:\n${list.join("\n")}` : "No threads are currently blacklisted.",
+      event.threadID,
+      event.messageID
+    );
+  }
+
+  return api.sendMessage(
+    "Usage: .zia blacklist add|remove|list [threadID]",
+    event.threadID,
+    event.messageID
+  );
+}
+
+async function handleStatsCommand(api, event) {
+  if (!isBotAdmin(event.senderID)) {
+    return api.sendMessage("Only bot admins can view stats.", event.threadID, event.messageID);
+  }
+
+  const stats = [
+    `Active model: ${modelRegistry.get()}`,
+    `Threads with memory: ${threadMemory.threadCount()}`,
+    `Total stored turns: ${threadMemory.totalTurns()}`,
+    `Blacklisted threads: ${threadBlacklist.list().length}`,
+    `Users currently rate-limited (active window): ${rateLimiter.activeUserCount()}`,
+    `Thread persona overrides active: ${personaStore.overrides.size}`
+  ].join("\n");
+
+  return api.sendMessage(`📊 ZIA STATS\n\n${stats}`, event.threadID, event.messageID);
+}
+
+function isManagementCommand(normalizedPrompt) {
+  return (
+    normalizedPrompt === "update" ||
+    normalizedPrompt === "broadcast update" ||
+    normalizedPrompt === "help" ||
+    normalizedPrompt === "stats" ||
+    normalizedPrompt.startsWith("model") ||
+    normalizedPrompt.startsWith("persona") ||
+    normalizedPrompt.startsWith("blacklist")
+  );
+}
+
+async function routeManagementCommand(api, event, prompt, normalizedPrompt) {
+  if (normalizedPrompt === "update" || normalizedPrompt === "broadcast update") {
+    return handleUpdateBroadcast(api, event);
+  }
+  if (normalizedPrompt === "help") {
+    return handleHelpCommand(api, event);
+  }
+  if (normalizedPrompt === "stats") {
+    return handleStatsCommand(api, event);
+  }
+  if (normalizedPrompt.startsWith("model")) {
+    return handleModelCommand(api, event, prompt.slice("model".length));
+  }
+  if (normalizedPrompt.startsWith("persona")) {
+    return handlePersonaCommand(api, event, prompt.slice("persona".length));
+  }
+  if (normalizedPrompt.startsWith("blacklist")) {
+    return handleBlacklistCommand(api, event, prompt.slice("blacklist".length));
+  }
+  return null;
+}
+
 function sendUsage(api, event) {
   return api.sendMessage(
 `Please enter a message.
@@ -522,16 +891,99 @@ Example:
 .zia Explain Quantum Physics
 .zia Write a JavaScript calculator
 
-Use ".zia clear" to reset the conversation memory for this thread.`,
+Use ".zia clear" to reset the conversation memory for this thread.
+Use ".zia help" to see all available commands.`,
     event.threadID,
     event.messageID
   );
 }
 
+function extractMentionedText(event, botID) {
+  if (!botID || !event.mentions || !event.mentions[botID]) return null;
+  const cleaned = event.body.replace(new RegExp(`@[^\\s@]*`, "g"), "").trim();
+  return cleaned;
+}
+
+async function answerWithZia(api, event, rawPrompt) {
+  if (threadBlacklist.has(event.threadID)) return;
+
+  const prompt = rawPrompt.trim();
+  if (!prompt) return;
+
+  if (prompt.length > MAX_PROMPT_LENGTH) {
+    return api.sendMessage(
+      `That message is too long (${prompt.length} characters). Please shorten it to under ${MAX_PROMPT_LENGTH} characters.`,
+      event.threadID,
+      event.messageID
+    );
+  }
+
+  const greetingReply = findGreetingReply(prompt);
+  if (greetingReply) {
+    return api.sendMessage(greetingReply, event.threadID, event.messageID);
+  }
+
+  const rateCheck = rateLimiter.check(event.senderID);
+  if (!rateCheck.allowed) {
+    const seconds = Math.ceil(rateCheck.retryAfterMs / 1000);
+    return api.sendMessage(
+      `You're sending requests too fast — please wait ${seconds}s before trying again.`,
+      event.threadID,
+      event.messageID
+    );
+  }
+
+  const client = geminiClient.get();
+  if (!client) {
+    return api.sendMessage(
+      "No Gemini API key is configured on this bot (GEMINI_API_KEY is missing). Get a free key at aistudio.google.com/apikey and set it as an environment variable, then restart the bot.",
+      event.threadID,
+      event.messageID
+    );
+  }
+
+  try {
+    const replyContextPrefix = buildReplyContextPrefix(event);
+    const imageParts = await buildImageParts(event);
+    const effectiveText = `${replyContextPrefix}${prompt}`;
+
+    const userParts = imageParts.length
+      ? [{ text: effectiveText }, ...imageParts]
+      : [{ text: effectiveText }];
+
+    const contents = [
+      ...threadMemory.get(event.threadID),
+      { role: "user", parts: userParts }
+    ];
+
+    const personaOverride = personaStore.get(event.threadID);
+    const systemInstruction = personaOverride
+      ? `${SYSTEM_INSTRUCTION}\n\n## Thread-Specific Tone Override\nFor this specific conversation, additionally follow this instruction from the group's admin: ${personaOverride}`
+      : SYSTEM_INSTRUCTION;
+
+    const result = await generateWithRetry(client, {
+      model: modelRegistry.get(),
+      contents,
+      config: {
+        systemInstruction,
+        ...GENERATION_CONFIG
+      }
+    });
+
+    const answer = extractAnswerText(result);
+    threadMemory.push(event.threadID, effectiveText, answer);
+
+    return api.sendMessage(truncateForDisplay(answer), event.threadID, event.messageID);
+  } catch (err) {
+    console.error("Gemini raw error:", JSON.stringify(err, Object.getOwnPropertyNames(err)));
+    return api.sendMessage(`ERROR: ${resolveErrorMessage(err)}`, event.threadID, event.messageID);
+  }
+}
+
 module.exports.config = {
   name: "zia",
   aliases: ["nova", "asknova", "gemini"],
-  version: "3.6.0",
+  version: "3.7.0",
   author: "Bright Hemsworth",
   credits: "Bright Hemsworth",
   description: "Advanced AI Assistant powered by Google Gemini",
@@ -562,11 +1014,14 @@ module.exports.run = async function ({ api, event, args }) {
   const prompt = args.join(" ").trim();
 
   if (!prompt) {
+    if (threadBlacklist.has(event.threadID)) return;
     return sendUsage(api, event);
   }
 
   const normalizedPrompt = prompt.toLowerCase();
+
   if (normalizedPrompt === "clear" || normalizedPrompt === "reset") {
+    if (threadBlacklist.has(event.threadID)) return;
     threadMemory.clear(event.threadID);
     return api.sendMessage(
       "Conversation memory cleared for this thread.",
@@ -575,45 +1030,22 @@ module.exports.run = async function ({ api, event, args }) {
     );
   }
 
-  if (normalizedPrompt === "update" || normalizedPrompt === "broadcast update") {
-    return handleUpdateBroadcast(api, event);
+  if (isManagementCommand(normalizedPrompt)) {
+    return routeManagementCommand(api, event, prompt, normalizedPrompt);
   }
 
-  const greetingReply = findGreetingReply(prompt);
-  if (greetingReply) {
-    return api.sendMessage(greetingReply, event.threadID, event.messageID);
-  }
+  return answerWithZia(api, event, prompt);
+};
 
-  const client = geminiClient.get();
-  if (!client) {
-    return api.sendMessage(
-      "No Gemini API key is configured on this bot (GEMINI_API_KEY is missing). Get a free key at aistudio.google.com/apikey and set it as an environment variable, then restart the bot.",
-      event.threadID,
-      event.messageID
-    );
-  }
+module.exports.handleEvent = async function ({ api, event }) {
+  if (!event.body) return;
 
-  try {
-    const contents = [
-      ...threadMemory.get(event.threadID),
-      { role: "user", parts: [{ text: prompt }] }
-    ];
+  const botID = api.getCurrentUserID ? api.getCurrentUserID() : null;
+  if (botID && event.senderID === botID) return;
 
-    const result = await client.models.generateContent({
-      model: MODEL_NAME,
-      contents,
-      config: {
-        systemInstruction: SYSTEM_INSTRUCTION,
-        ...GENERATION_CONFIG
-      }
-    });
+  const mentionedText = extractMentionedText(event, botID);
+  if (mentionedText === null) return;
+  if (!mentionedText) return;
 
-    const answer = extractAnswerText(result);
-    threadMemory.push(event.threadID, prompt, answer);
-
-    return api.sendMessage(truncateForDisplay(answer), event.threadID, event.messageID);
-  } catch (err) {
-    console.error("Gemini raw error:", JSON.stringify(err, Object.getOwnPropertyNames(err)));
-    return api.sendMessage(`ERROR: ${resolveErrorMessage(err)}`, event.threadID, event.messageID);
-  }
+  return answerWithZia(api, event, mentionedText);
 };
